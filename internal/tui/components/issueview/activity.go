@@ -4,7 +4,6 @@ import (
 	"sort"
 	"time"
 
-	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
@@ -65,7 +64,7 @@ func renderEmptyState() string {
 
 func (m *Model) renderComment(
 	comment data.IssueComment,
-	markdownRenderer glamour.TermRenderer,
+	markdownRenderer markdown.Renderer,
 ) (string, error) {
 	width := m.getIndentedContentWidth() - 2
 	header := lipgloss.NewStyle().

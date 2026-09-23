@@ -548,6 +548,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, keys.NotificationKeys.BackToNotification):
 				return m, m.backToNotification()
 
+			// Scrolling the preview only moves the sidebar's viewport (below), so
+			// skip the subject handlers, which re-render the whole preview
+			case (m.notificationView.GetSubjectPR() != nil ||
+				m.notificationView.GetSubjectIssue() != nil) &&
+				(key.Matches(msg, m.keys.PageDown) || key.Matches(msg, m.keys.PageUp)):
+
 			// PR keybindings when viewing a PR notification
 			case m.notificationView.GetSubjectPR() != nil:
 				// Check for PR actions first (before updating prView)

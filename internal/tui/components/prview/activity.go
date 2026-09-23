@@ -5,7 +5,6 @@ import (
 	"sort"
 	"time"
 
-	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
@@ -110,7 +109,7 @@ type comment struct {
 
 func (m *Model) renderComment(
 	comment comment,
-	markdownRenderer glamour.TermRenderer,
+	markdownRenderer markdown.Renderer,
 ) (string, error) {
 	width := m.getIndentedContentWidth()
 	authorAndTime := lipgloss.NewStyle().
@@ -152,7 +151,7 @@ func (m *Model) renderComment(
 
 func (m *Model) renderReview(
 	review data.Review,
-	markdownRenderer glamour.TermRenderer,
+	markdownRenderer markdown.Renderer,
 ) (string, error) {
 	header := m.renderReviewHeader(review)
 	body, err := markdownRenderer.Render(review.Body)

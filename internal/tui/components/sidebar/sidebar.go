@@ -71,8 +71,7 @@ func (m Model) View() string {
 		return style.Render(lipgloss.JoinVertical(
 			lipgloss.Top,
 			m.viewport.View(),
-			m.ctx.Styles.Sidebar.PagerStyle.
-				Render(fmt.Sprintf("%d%%", int(m.viewport.ScrollPercent()*100))),
+			m.renderPager(),
 		))
 	}
 
@@ -91,9 +90,23 @@ func (m Model) View() string {
 	return style.Render(lipgloss.JoinVertical(
 		lipgloss.Top,
 		m.viewport.View(),
-		m.ctx.Styles.Sidebar.PagerStyle.
-			Render(fmt.Sprintf("%d%%", int(m.viewport.ScrollPercent()*100))),
+		m.renderPager(),
 	))
+}
+
+// renderPager renders the scroll percentage followed by hints for the keys
+// that scroll in the directions still available.
+func (m Model) renderPager() string {
+	pager := fmt.Sprintf("%d%%", int(m.viewport.ScrollPercent()*100))
+	if m.viewport.TotalLineCount() > m.viewport.Height() {
+		if !m.viewport.AtTop() {
+			pager += fmt.Sprintf(" · %s ↑", keys.Keys.PageUp.Help().Key)
+		}
+		if !m.viewport.AtBottom() {
+			pager += fmt.Sprintf(" · %s ↓", keys.Keys.PageDown.Help().Key)
+		}
+	}
+	return m.ctx.Styles.Sidebar.PagerStyle.Render(pager)
 }
 
 func (m *Model) SetContent(data string) {
