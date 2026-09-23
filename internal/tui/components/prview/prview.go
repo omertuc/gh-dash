@@ -44,9 +44,42 @@ type Model struct {
 	activityCache   *activityCache
 	editor          cmpcontroller.Controller
 	summaryViewMore bool
+	// expandedCommit is the oid of the commit shown with its full message,
+	// e.g. the focused one
+	expandedCommit string
+	// expandedCheck identifies the check shown with its details, e.g. the
+	// focused one
+	expandedCheck string
+	// commitFiles narrows the files tab to a commit's files, or is nil to show
+	// all of the PR's files
+	commitFiles *commitFiles
+}
+
+// commitFiles are the files changed by a commit, shown in the files tab.
+type commitFiles struct {
+	oid            string
+	abbreviatedOid string
+	files          []data.ChangedFile
+	loading        bool
+	err            error
+}
+
+// CommitFilesMsg carries the files changed by a commit, once fetched.
+type CommitFilesMsg struct {
+	Oid   string
+	Files []data.ChangedFile
+	Err   error
 }
 
 var tabs = []string{" Overview", " Activity", " Commits", " Checks", " Files Changed"}
+
+const (
+	overviewTab = iota
+	activityTab
+	commitsTab
+	checksTab
+	filesTab
+)
 
 func NewModel(ctx *context.ProgramContext) Model {
 	c := carousel.NewModel(
@@ -123,9 +156,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch {
 		case key.Matches(keyMsg, keys.PRKeys.PrevSidebarTab):
-			m.carousel.MoveLeft()
+			m.PrevTab()
 		case key.Matches(keyMsg, keys.PRKeys.NextSidebarTab):
-			m.carousel.MoveRight()
+			m.NextTab()
 		}
 	}
 
@@ -153,28 +186,38 @@ func (m Model) ViewBodyWithAnchors() (string, []common.CommentAnchor) {
 		return "", nil
 	}
 
-	if m.carousel.SelectedItem() == tabs[1] {
+	if m.carousel.Cursor() == activityTab {
 		// Cached, since it re-renders on every keystroke while writing a
 		// comment in the editor docked below it
 		return m.cachedActivity()
 	}
 
 	body := strings.Builder{}
-	switch m.carousel.SelectedItem() {
-	case tabs[0]:
+	var anchors []common.CommentAnchor
+	switch m.carousel.Cursor() {
+	case overviewTab:
 		body.WriteString(m.viewOverviewTab())
-	case tabs[2]:
-		body.WriteString(m.renderCommits())
-	case tabs[3]:
-		body.WriteString(m.renderChecksOverview())
+	case commitsTab:
+		var commits string
+		commits, anchors = m.renderCommits()
+		body.WriteString(commits)
+	case checksTab:
+		overview := m.renderChecksOverview()
+		checks, checkAnchors := m.renderChecks()
+		body.WriteString(overview)
 		body.WriteString("\n\n")
-		body.WriteString(m.renderChecks())
-	case tabs[4]:
+		body.WriteString(checks)
+		// The checks start below the overview and the blank line after it
+		for _, a := range checkAnchors {
+			a.Line += lipgloss.Height(overview) + 1
+			anchors = append(anchors, a)
+		}
+	case filesTab:
 		body.WriteString(m.renderChangedFiles())
 	}
 
 	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).
-		Render(body.String()), nil
+		Render(body.String()), anchors
 }
 
 // ViewEditor renders the editor, docked below the preview's content, or ""
@@ -710,6 +753,13 @@ func (m *Model) SetSectionId(id int) {
 }
 
 func (m *Model) SetRow(d *prrow.Data) {
+	if m.pr == nil || d == nil || m.pr.Data.Primary.Url != d.Primary.Url {
+		// What's expanded and narrowed to belongs to the previous PR
+		m.expandedCommit = ""
+		m.expandedCheck = ""
+		m.commitFiles = nil
+		m.syncTabs()
+	}
 	if d == nil {
 		m.pr = nil
 	} else {
@@ -918,19 +968,127 @@ func (m *Model) prAssignees() []string {
 }
 
 func (m *Model) GoToFirstTab() {
-	m.carousel.SetCursor(0)
+	m.setTab(overviewTab)
 }
 
 func (m *Model) GoToActivityTab() {
-	m.carousel.SetCursor(1) // Activity is the second tab (index 1)
+	m.setTab(activityTab)
 }
 
 func (m *Model) PrevTab() {
-	m.carousel.MoveLeft()
+	m.setTab(max(0, m.carousel.Cursor()-1))
 }
 
 func (m *Model) NextTab() {
-	m.carousel.MoveRight()
+	m.setTab(min(len(tabs)-1, m.carousel.Cursor()+1))
+}
+
+// setTab selects a tab. Leaving the files tab shows all of the PR's files
+// again. The expanded commit is kept, to focus it again on coming back.
+func (m *Model) setTab(tab int) {
+	m.carousel.SetCursor(tab)
+	if tab != filesTab {
+		m.commitFiles = nil
+	}
+	m.syncTabs()
+}
+
+// syncTabs names the tabs, with the files tab naming the commit it's narrowed
+// to, e.g. "Files Changed (abc1234)".
+func (m *Model) syncTabs() {
+	items := slices.Clone(tabs)
+	if m.commitFiles != nil {
+		items[filesTab] += " (" + m.commitFiles.abbreviatedOid + ")"
+	}
+	if slices.Equal(items, m.carousel.Items()) {
+		return
+	}
+	m.carousel.SetItems(items)
+	// The tabs' width changed, which decides whether the hint fits
+	m.SetWidth(m.width)
+}
+
+// IsCommitsTab reports whether the commits tab is selected.
+func (m Model) IsCommitsTab() bool {
+	return m.carousel.Cursor() == commitsTab
+}
+
+// SetFocusedCommit expands the commit at the given index to show its full
+// message, collapsing any other. It reports whether that changed anything.
+func (m *Model) SetFocusedCommit(i int) bool {
+	oid := ""
+	if m.hasData() {
+		if commits := m.pr.Data.Enriched.AllCommits.Nodes; i >= 0 && i < len(commits) {
+			oid = commits[i].Commit.Oid
+		}
+	}
+	if oid == m.expandedCommit {
+		return false
+	}
+	m.expandedCommit = oid
+	return true
+}
+
+// ExpandedCommitIndex returns the index of the commit shown with its full
+// message, or -1 when there's none.
+func (m Model) ExpandedCommitIndex() int {
+	if !m.hasData() || m.expandedCommit == "" {
+		return -1
+	}
+	for i, c := range m.pr.Data.Enriched.AllCommits.Nodes {
+		if c.Commit.Oid == m.expandedCommit {
+			return i
+		}
+	}
+	return -1
+}
+
+// ViewCommitFiles narrows the files tab to the files changed by the commit at
+// the given index and switches to it, returning the command fetching them.
+// With only one commit, it just switches to the files tab.
+func (m *Model) ViewCommitFiles(i int) tea.Cmd {
+	if !m.hasData() {
+		return nil
+	}
+	commits := m.pr.Data.Enriched.AllCommits.Nodes
+	if i < 0 || i >= len(commits) {
+		return nil
+	}
+	m.setTab(filesTab)
+	if len(commits) == 1 {
+		// The commit's files are the PR's files
+		return nil
+	}
+	commit := commits[i].Commit
+	m.commitFiles = &commitFiles{
+		oid:            commit.Oid,
+		abbreviatedOid: commit.AbbreviatedOid,
+		loading:        true,
+	}
+	m.syncTabs()
+
+	repo := m.pr.Data.Primary.GetRepoNameWithOwner()
+	oid := commit.Oid
+	return func() tea.Msg {
+		files, err := data.FetchCommitFiles(repo, oid)
+		return CommitFilesMsg{Oid: oid, Files: files, Err: err}
+	}
+}
+
+// SetCommitFiles shows the fetched files of the commit the files tab is
+// narrowed to. Files of a commit that's no longer shown are dropped.
+func (m *Model) SetCommitFiles(msg CommitFilesMsg) {
+	if m.commitFiles == nil || m.commitFiles.oid != msg.Oid {
+		return
+	}
+	m.commitFiles.loading = false
+	m.commitFiles.files = msg.Files
+	m.commitFiles.err = msg.Err
+}
+
+// IsFirstTab reports whether the first tab, the overview, is selected.
+func (m Model) IsFirstTab() bool {
+	return m.carousel.Cursor() == 0
 }
 
 func (m Model) SelectedTab() string {

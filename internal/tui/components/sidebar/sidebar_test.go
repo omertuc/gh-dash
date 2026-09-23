@@ -275,6 +275,42 @@ func TestFocusHintOnCommentTitle(t *testing.T) {
 	}
 }
 
+func TestFocusAnchorKeepsFocusAfterRelayout(t *testing.T) {
+	m := newCommentsSidebar(3, 3, 3)
+	m.FocusNext()
+	m.FocusNext()
+	anchor := m.FocusedAnchor()
+
+	// The focused comment grows, moving the ones after it
+	m.SetContentWithHeader("", strings.Repeat("line\n", 5)+strings.Repeat("line\n", 12),
+		"", []int{2, 5, 17})
+	m.FocusAnchor(anchor, false)
+
+	if got := m.FocusedAnchor(); got != anchor {
+		t.Fatalf("focused anchor = %d, want %d", got, anchor)
+	}
+	if m.viewport.YOffset() != 5 {
+		t.Fatalf("a comment taller than the view should be shown from its top, offset = %d",
+			m.viewport.YOffset())
+	}
+}
+
+func TestFocusHintBelowFullTitle(t *testing.T) {
+	m := newTestSidebar(0)
+	full := strings.Repeat("─", m.viewport.Width())
+	m.SetContentWithHeader("", "heading\n"+full+"\n│ @alice committed", "", []int{1})
+	m.SetFocusHint("enter files")
+
+	m.FocusNext()
+	lines := strings.Split(ansi.Strip(m.renderContent()), "\n")
+	if strings.Contains(lines[1], "enter files") {
+		t.Fatalf("hint covered the full title: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "enter files") {
+		t.Fatalf("expected the hint on the line below the title, got %q", lines[2])
+	}
+}
+
 func TestFooterStaysDockedBelowScrollingContent(t *testing.T) {
 	m := newTestSidebar(0)
 	m.SetContentWithHeader("", strings.TrimSuffix(strings.Repeat("line\n", 50), "\n"),
@@ -291,5 +327,28 @@ func TestFooterStaysDockedBelowScrollingContent(t *testing.T) {
 		if strings.TrimSpace(lines[n-3]) != "EDITOR 1" || strings.TrimSpace(lines[n-2]) != "EDITOR 2" {
 			t.Fatalf("footer not docked at the bottom: %q", lines[n-4:])
 		}
+	}
+}
+
+func TestActionBarDropsHintsThatDontFit(t *testing.T) {
+	m := newTestSidebar(50)
+	m.SetActionHints([]ActionHint{{"D", "done"}, {"u", "unsubscribe"}, {"c", "comment"}})
+	m.SetContentWithHeader("header", strings.Repeat("line\n", 50), "", nil)
+	height := lipgloss.Height(m.renderContent())
+
+	if got := ansi.Strip(m.renderActionBar()); got != "  D done · u unsubscribe · c comment" {
+		t.Errorf("got %q", got)
+	}
+
+	m.viewport.SetWidth(30)
+	if got := ansi.Strip(m.renderActionBar()); got != "  D done · ? more" {
+		t.Errorf("narrow: got %q", got)
+	}
+
+	// The bar takes a line from the content rather than growing the preview
+	m.SetActionHints(nil)
+	m.SetContentWithHeader("header", strings.Repeat("line\n", 50), "", nil)
+	if got := lipgloss.Height(m.renderContent()); got != height {
+		t.Errorf("height changed from %d to %d", height, got)
 	}
 }

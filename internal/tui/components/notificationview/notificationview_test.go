@@ -3,12 +3,16 @@ package notificationview
 import (
 	"testing"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dlvhdr/gh-dash/v4/internal/config"
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/notificationrow"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prrow"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/theme"
 )
 
 func TestSetPendingPRAction(t *testing.T) {
@@ -351,4 +355,31 @@ func TestUpdate_ReturnsActionOnConfirm(t *testing.T) {
 	_, action := m.Update(msg)
 
 	require.Equal(t, "pr_close", action, "should return the action on confirm")
+}
+
+func TestView_ShowsLoadingSpinnerWhileFetchingSubject(t *testing.T) {
+	cfg := config.Config{Theme: &config.ThemeConfig{}}
+	th := *theme.DefaultTheme
+	ctx := context.ProgramContext{Config: &cfg, Theme: th, Styles: context.InitStyles(th)}
+	m := NewModel(&ctx)
+	m.SetWidth(80)
+	m.SetRow(&notificationrow.Data{Notification: data.NotificationData{
+		Id:      "1",
+		Subject: data.NotificationSubject{Title: "Fix bug", Type: "PullRequest"},
+	}})
+
+	require.NotContains(t, m.View(), "Loading pull request")
+
+	require.NotNil(t, m.StartLoading("1"))
+	require.True(t, m.IsLoading())
+	require.Contains(t, m.View(), "Loading pull request...")
+
+	// Loading another notification's subject doesn't show on this one
+	m.StartLoading("2")
+	require.NotContains(t, m.View(), "Loading")
+
+	m.StopLoading()
+	require.False(t, m.IsLoading())
+	require.NotContains(t, m.View(), "Loading")
+	require.Nil(t, m.UpdateLoadingSpinner(spinner.TickMsg{}))
 }

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -243,6 +244,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		if m.sidebar.IsSearching() {
+			cmd = m.sidebar.UpdateSearch(msg)
+			m.syncFocusedCommit(false)
+			return m, cmd
+		}
+
 		if m.footer.ShowConfirmQuit && (msg.String() == "y" || msg.String() == "enter") {
 			return m, tea.Quit
 		} else if m.footer.ShowConfirmQuit {
@@ -301,9 +308,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.SectionMode):
 			m.mode = ModeSection
 
+		// With a notification's PR/Issue open, search its comments rather
+		// than the notifications
+		case key.Matches(msg, m.keys.Search) && m.isNotificationSubjectShown():
+			return m, m.sidebar.StartSearch()
+
+		case m.isNotificationSubjectShown() && m.sidebar.HasSearch() &&
+			(key.Matches(msg, keys.NotificationKeys.NextMatch) ||
+				key.Matches(msg, keys.NotificationKeys.PrevMatch)):
+			if key.Matches(msg, keys.NotificationKeys.NextMatch) {
+				m.sidebar.SearchNext()
+			} else {
+				m.sidebar.SearchPrev()
+			}
+			m.syncFocusedCommit(false)
+			return m, nil
+
+		// Esc drops the search before going back to the notification
+		case m.isNotificationSubjectShown() && m.sidebar.HasSearch() &&
+			key.Matches(msg, keys.NotificationKeys.BackToNotification):
+			m.sidebar.ClearSearch()
+			return m, nil
+
 		// With a comment focused in an open notification, reply to it
 		case key.Matches(msg, keys.NotificationKeys.ReplyToComment) && m.hasFocusedComment():
 			return m, m.replyToFocusedComment()
+
+		// With a commit focused in an open notification's PR, show its files
+		case key.Matches(msg, keys.NotificationKeys.ViewCommitFiles) && m.hasFocusedCommit():
+			return m, m.viewFocusedCommitFiles()
+
+		// With a check focused in an open notification's PR, open it
+		case key.Matches(msg, keys.NotificationKeys.OpenCheck) && m.hasFocusedCheck():
+			return m, m.openFocusedCheck()
 
 		case key.Matches(msg, keys.NotificationKeys.ContinueDraft) && m.hasDetachedDraft():
 			return m, m.continueDraft()
@@ -318,6 +355,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
 			(key.Matches(msg, m.keys.PrevSection) || key.Matches(msg, m.keys.NextSection)):
 			if key.Matches(msg, m.keys.PrevSection) {
+				if m.prView.IsFirstTab() {
+					// There's nothing further left, so go back to the list
+					return m, m.backToNotification()
+				}
 				m.prView.PrevTab()
 			} else {
 				m.prView.NextTab()
@@ -358,10 +399,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, m.keys.FirstLine):
 				m.sidebar.ScrollToTop()
 				m.sidebar.ResetFocus()
+				// So the first commit is focused, rather than the last one
+				m.prView.SetFocusedCommit(-1)
+				m.prView.SetFocusedCheck(-1)
 			case key.Matches(msg, m.keys.LastLine):
 				m.sidebar.ScrollToBottom()
 				m.sidebar.FocusLast()
 			}
+			m.syncFocusedCommit(key.Matches(msg, m.keys.Up))
 
 		case key.Matches(msg, m.keys.Down):
 			if currSection != nil {
@@ -827,6 +872,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateTabs()
 		cmds = append(cmds, fetchSectionsCmds, m.doRefreshAtInterval())
 
+	case prview.CommitFilesMsg:
+		if msg.Err != nil {
+			log.Error("failed fetching commit files", "oid", msg.Oid, "err", msg.Err)
+		}
+		m.prView.SetCommitFiles(msg)
+		m.syncSidebar()
+
 	case userFetchedMsg:
 		m.ctx.User = msg.user
 
@@ -867,6 +919,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case notificationPRFetchedMsg:
+		m.stopNotificationLoading(msg.NotificationId)
 		if msg.Err == nil {
 			// Convert enriched PR to prrow.Data for display
 			prData := msg.PR.ToPullRequestData()
@@ -898,9 +951,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markNotificationAsRead(msg.NotificationId)
 		} else {
 			log.Error("failed fetching notification PR", "err", msg.Err)
+			m.ctx.Error = msg.Err
 		}
 
 	case notificationIssueFetchedMsg:
+		m.stopNotificationLoading(msg.NotificationId)
 		if msg.Err == nil {
 			m.notificationView.SetSubjectIssue(&msg.Issue, msg.NotificationId)
 			keys.SetNotificationSubject(keys.NotificationSubjectIssue)
@@ -918,6 +973,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markNotificationAsRead(msg.NotificationId)
 		} else {
 			log.Error("failed fetching notification Issue", "err", msg.Err)
+			m.ctx.Error = msg.Err
 		}
 
 	case notificationssection.UpdateNotificationReadStateMsg:
@@ -934,6 +990,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, msg.Next())
 
 	case spinner.TickMsg:
+		if m.notificationView.IsLoading() {
+			cmds = append(cmds, m.notificationView.UpdateLoadingSpinner(msg))
+			if m.isNotificationLoadingShown() {
+				m.sidebar.SetContent(m.notificationView.View())
+			}
+		}
 		if len(m.tasks) > 0 {
 			taskSpinner, internalTickCmd := m.taskSpinner.Update(msg)
 			m.taskSpinner = taskSpinner
@@ -1098,12 +1160,7 @@ func (m *Model) View() tea.View {
 		s.WriteString(m.tabs.View())
 	}
 	s.WriteString("\n")
-	m.sidebar.SetNavKeysScroll(m.isNotificationSubjectShown())
-	if m.isNotificationSubjectShown() {
-		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ReplyToComment) + " reply")
-	} else {
-		m.sidebar.SetFocusHint("")
-	}
+	m.updateSidebarHints()
 	var content string
 	currSection := m.getCurrSection()
 	if currSection != nil {
@@ -1203,6 +1260,30 @@ type notificationIssueFetchedMsg struct {
 	Issue            data.IssueData
 	LatestCommentUrl string
 	Err              error
+}
+
+// stopNotificationLoading stops the notification view's loading spinner once
+// the subject it was loading has arrived. The sidebar is re-rendered so it no
+// longer shows the spinner, e.g. when fetching failed.
+func (m *Model) stopNotificationLoading(notificationId string) {
+	if m.notificationView.GetLoadingId() != notificationId {
+		return
+	}
+	shown := m.isNotificationLoadingShown()
+	m.notificationView.StopLoading()
+	if shown {
+		m.sidebar.SetContent(m.notificationView.View())
+	}
+}
+
+// isNotificationLoadingShown reports whether the sidebar is showing the
+// notification whose subject is being loaded.
+func (m *Model) isNotificationLoadingShown() bool {
+	if !m.sidebar.IsOpen || m.ctx.View != config.NotificationsView {
+		return false
+	}
+	row, ok := m.getCurrRowData().(*notificationrow.Data)
+	return ok && row != nil && row.GetId() == m.notificationView.GetLoadingId()
 }
 
 // resumeLoadingSpinner restarts the current section's loading spinner if it's
@@ -1441,6 +1522,28 @@ func (m *Model) openSidebarForInput(setFunc func(bool) tea.Cmd) tea.Cmd {
 	return cmd
 }
 
+// updateSidebarHints sets the key hints the sidebar shows for moving around
+// and acting on what's focused in it.
+func (m *Model) updateSidebarHints() {
+	m.sidebar.SetNavKeysScroll(m.isNotificationSubjectShown())
+	switch {
+	case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+		m.prView.IsCommitsTab():
+		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ViewCommitFiles) + " files")
+		m.sidebar.SetFocusLabel("commit")
+	case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+		m.prView.IsChecksTab():
+		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.OpenCheck) + " open")
+		m.sidebar.SetFocusLabel("check")
+	case m.isNotificationSubjectShown():
+		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ReplyToComment) + " reply")
+		m.sidebar.SetFocusLabel("comment")
+	default:
+		m.sidebar.SetFocusHint("")
+		m.sidebar.SetFocusLabel("")
+	}
+}
+
 // previewScrollLines is how far the navigation keys scroll an open
 // notification's preview.
 const previewScrollLines = 3
@@ -1460,6 +1563,7 @@ func (m *Model) backToNotification() tea.Cmd {
 	m.stashDraft()
 	m.notificationView.ClearSubject()
 	keys.SetNotificationSubject(keys.NotificationSubjectNone)
+	m.sidebar.ClearSearch()
 	m.sidebar.ScrollToTop()
 	return m.syncSidebar()
 }
@@ -1473,6 +1577,11 @@ func (m *Model) promptConfirmation(currSection section.Section, action string) t
 }
 
 func (m *Model) setSidebarPRContent() {
+	m.renderSidebarPRContent()
+	m.syncFocusedCommit(false)
+}
+
+func (m *Model) renderSidebarPRContent() {
 	body, comments := m.prView.ViewBodyWithAnchors()
 	m.setSidebarContentWithComments(m.prView.ViewHeader(), body,
 		m.prView.ViewEditor(m.draftHint()), comments)
@@ -1493,7 +1602,66 @@ func (m *Model) setSidebarContentWithComments(
 	for _, c := range comments {
 		lines = append(lines, c.Line)
 	}
+	m.sidebar.SetActionHints(m.notificationActionHints())
 	m.sidebar.SetContentWithHeader(header, body, editor, lines)
+}
+
+// notificationActionHints lists the keys for acting on an open notification
+// and its PR/Issue, shown above it, most important first. A notification
+// action whose key is taken by the PR/Issue isn't listed as it wouldn't work.
+func (m *Model) notificationActionHints() []sidebar.ActionHint {
+	if !m.isNotificationSubjectShown() {
+		return nil
+	}
+
+	var subjectKeys, subjectActions []key.Binding
+	if pr := m.notificationView.GetSubjectPR(); pr != nil {
+		subjectKeys = append(keys.PRFullHelp(), keys.CustomPRBindings...)
+		subjectActions = []key.Binding{keys.PRKeys.Comment, keys.PRKeys.Approve, keys.PRKeys.Diff,
+			keys.PRKeys.Checkout}
+		if pr.Primary != nil && pr.Primary.State == "OPEN" {
+			subjectActions = append(subjectActions, keys.PRKeys.Merge)
+		}
+	} else if issue := m.notificationView.GetSubjectIssue(); issue != nil {
+		subjectKeys = append(keys.IssueFullHelp(), keys.CustomIssueBindings...)
+		subjectActions = []key.Binding{keys.IssueKeys.Comment, keys.IssueKeys.Label,
+			keys.IssueKeys.Assign}
+		if issue.State == "OPEN" {
+			subjectActions = append(subjectActions, keys.IssueKeys.Close)
+		} else {
+			subjectActions = append(subjectActions, keys.IssueKeys.Reopen)
+		}
+	}
+
+	taken := func(b key.Binding) bool {
+		for _, k := range b.Keys() {
+			for _, sk := range subjectKeys {
+				if slices.Contains(sk.Keys(), k) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var hints []sidebar.ActionHint
+	notificationActions := []struct {
+		binding key.Binding
+		label   string
+	}{
+		{keys.NotificationKeys.MarkAsDone, "done"},
+		{keys.NotificationKeys.Unsubscribe, "unsubscribe"},
+		{keys.NotificationKeys.ToggleBookmark, "bookmark"},
+	}
+	for _, a := range notificationActions {
+		if a.binding.Enabled() && !taken(a.binding) {
+			hints = append(hints, sidebar.ActionHint{Key: keys.HintKeys(a.binding), Label: a.label})
+		}
+	}
+	for _, b := range subjectActions {
+		hints = append(hints, sidebar.ActionHint{Key: keys.HintKeys(b), Label: b.Help().Desc})
+	}
+	return hints
 }
 
 // draftHint is shown on a detached comment draft.
@@ -1589,10 +1757,157 @@ func (m *Model) focusedComment() (common.CommentAnchor, bool) {
 		return common.CommentAnchor{}, false
 	}
 	i := m.sidebar.FocusedAnchor()
-	if i < 0 || i >= len(m.sidebarComments) {
+	if i < 0 || i >= len(m.sidebarComments) || !m.sidebarComments[i].IsComment() {
 		return common.CommentAnchor{}, false
 	}
 	return m.sidebarComments[i], true
+}
+
+// focusedCommit returns the index of the commit focused in an open
+// notification's PR, if any.
+func (m *Model) focusedCommit() (int, bool) {
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil {
+		return 0, false
+	}
+	i := m.sidebar.FocusedAnchor()
+	if i < 0 || i >= len(m.sidebarComments) || m.sidebarComments[i].Commit == nil {
+		return 0, false
+	}
+	return *m.sidebarComments[i].Commit, true
+}
+
+func (m *Model) hasFocusedCommit() bool {
+	_, ok := m.focusedCommit()
+	return ok
+}
+
+// syncFocusedCommit keeps a commit focused in an open notification's PR and
+// shows its full message. When the focus is lost, e.g. on entering the tab or
+// moving above the first commit, the expanded commit is focused again, e.g.
+// coming back from its files, or else the first commit in view. Expanding a
+// commit changes where the commits after it start, so the focus is put back
+// on it once they're laid out anew. fromBelow is whether the focus moved up,
+// to show a commit too tall for the view from its bottom.
+func (m *Model) syncFocusedCommit(fromBelow bool) {
+	if m.prView.IsChecksTab() {
+		m.syncFocusedCheck(fromBelow)
+		return
+	}
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil ||
+		!m.prView.IsCommitsTab() {
+		return
+	}
+	commit, ok := m.focusedCommit()
+	if !ok {
+		if anchor := m.commitAnchor(m.prView.ExpandedCommitIndex()); anchor >= 0 {
+			m.sidebar.FocusAnchor(anchor, false)
+		} else if !m.sidebar.FocusVisible() {
+			return
+		}
+		if commit, ok = m.focusedCommit(); !ok {
+			return
+		}
+	}
+	if !m.prView.SetFocusedCommit(commit) {
+		return
+	}
+	anchor := m.sidebar.FocusedAnchor()
+	m.renderSidebarPRContent()
+	m.sidebar.FocusAnchor(anchor, fromBelow)
+}
+
+// focusedCheck returns the index of the check focused in an open
+// notification's PR, as listed, if any.
+func (m *Model) focusedCheck() (int, bool) {
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil {
+		return 0, false
+	}
+	i := m.sidebar.FocusedAnchor()
+	if i < 0 || i >= len(m.sidebarComments) || m.sidebarComments[i].Check == nil {
+		return 0, false
+	}
+	return *m.sidebarComments[i].Check, true
+}
+
+func (m *Model) hasFocusedCheck() bool {
+	_, ok := m.focusedCheck()
+	return ok
+}
+
+// syncFocusedCheck keeps a check focused in an open notification's PR and
+// shows its details, the way syncFocusedCommit does for commits.
+func (m *Model) syncFocusedCheck(fromBelow bool) {
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil ||
+		!m.prView.IsChecksTab() {
+		return
+	}
+	check, ok := m.focusedCheck()
+	if !ok {
+		if anchor := m.checkAnchor(m.prView.ExpandedCheckIndex()); anchor >= 0 {
+			m.sidebar.FocusAnchor(anchor, false)
+		} else if !m.sidebar.FocusVisible() {
+			return
+		}
+		if check, ok = m.focusedCheck(); !ok {
+			return
+		}
+	}
+	if !m.prView.SetFocusedCheck(check) {
+		return
+	}
+	anchor := m.sidebar.FocusedAnchor()
+	m.renderSidebarPRContent()
+	m.sidebar.FocusAnchor(anchor, fromBelow)
+}
+
+// checkAnchor returns the index of the sidebar anchor of the check at the
+// given index, or -1 when it has none.
+func (m *Model) checkAnchor(check int) int {
+	for i, c := range m.sidebarComments {
+		if c.Check != nil && *c.Check == check {
+			return i
+		}
+	}
+	return -1
+}
+
+// openFocusedCheck opens the check focused in an open notification's PR in
+// the browser, e.g. its job's log.
+func (m *Model) openFocusedCheck() tea.Cmd {
+	check, ok := m.focusedCheck()
+	if !ok {
+		return nil
+	}
+	url := m.prView.CheckUrl(check)
+	if url == "" {
+		m.ctx.Error = errors.New("this check has no page to open")
+		return nil
+	}
+	return m.openUrlInBrowser(url)
+}
+
+// commitAnchor returns the index of the sidebar anchor of the commit at the
+// given index, or -1 when it has none.
+func (m *Model) commitAnchor(commit int) int {
+	for i, c := range m.sidebarComments {
+		if c.Commit != nil && *c.Commit == commit {
+			return i
+		}
+	}
+	return -1
+}
+
+// viewFocusedCommitFiles switches an open notification's PR to its files
+// tab, narrowed to the focused commit's files.
+func (m *Model) viewFocusedCommitFiles() tea.Cmd {
+	commit, ok := m.focusedCommit()
+	if !ok {
+		return nil
+	}
+	cmd := m.prView.ViewCommitFiles(commit)
+	m.sidebar.ScrollToTop()
+	m.syncSidebar()
+	return cmd
 }
 
 func (m *Model) hasFocusedComment() bool {
@@ -1676,6 +1991,8 @@ func (m *Model) syncSidebar() tea.Cmd {
 		// so key dispatch doesn't route keys to the wrong subject's handler.
 		m.stashDraft()
 		m.notificationView.ClearSubject()
+		m.notificationView.StopLoading()
+		m.sidebar.ClearSearch()
 		keys.SetNotificationSubject(keys.NotificationSubjectNone)
 		// Show prompt to view notification (don't auto-fetch)
 		// User must press Enter to view content and mark as read
@@ -1799,6 +2116,10 @@ func (m *Model) loadNotificationContent() tea.Cmd {
 	latestCommentUrl := row.GetLatestCommentUrl()
 
 	// Show loading indicator
+	var spinnerCmd tea.Cmd
+	if subjectType == "PullRequest" || subjectType == "Issue" {
+		spinnerCmd = m.notificationView.StartLoading(notifId)
+	}
 	width := m.sidebar.GetSidebarContentWidth()
 	m.notificationView.SetRow(row)
 	m.notificationView.SetWidth(width)
@@ -1807,6 +2128,7 @@ func (m *Model) loadNotificationContent() tea.Cmd {
 	switch subjectType {
 	case "PullRequest":
 		return tea.Batch(
+			spinnerCmd,
 			func() tea.Msg {
 				_ = data.MarkNotificationRead(notifId)
 				return notificationssection.UpdateNotificationReadStateMsg{
@@ -1826,6 +2148,7 @@ func (m *Model) loadNotificationContent() tea.Cmd {
 		)
 	case "Issue":
 		return tea.Batch(
+			spinnerCmd,
 			func() tea.Msg {
 				_ = data.MarkNotificationRead(notifId)
 				return notificationssection.UpdateNotificationReadStateMsg{

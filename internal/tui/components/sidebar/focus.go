@@ -130,6 +130,54 @@ func (m *Model) FocusLast() {
 	}
 }
 
+// FocusAnchor focuses the item at the given anchor and scrolls to show it,
+// e.g. to keep the focus on an item after the content was laid out anew. An
+// item taller than the view is shown from its bottom when fromBelow.
+func (m *Model) FocusAnchor(anchor int, fromBelow bool) {
+	items := m.focusItems()
+	if len(items) > 0 && items[0].preamble {
+		anchor++
+	}
+	if anchor < 0 || anchor >= len(items) {
+		return
+	}
+	m.focus = anchor
+	m.revealFocused(items, fromBelow)
+}
+
+// FocusVisible focuses the first item in view, or else the first item,
+// skipping the content before the first anchor. It reports false when there's
+// nothing to focus.
+func (m *Model) FocusVisible() bool {
+	items := m.focusItems()
+	y, h := m.viewport.YOffset(), m.viewport.Height()
+	first := -1
+	for i, it := range items {
+		if it.preamble {
+			continue
+		}
+		if it.start < y+h && it.end > y {
+			m.focus = i
+			return true
+		}
+		if first < 0 {
+			first = i
+		}
+	}
+	if first < 0 {
+		return false
+	}
+	m.focus = first
+	m.revealFocused(items, false)
+	return true
+}
+
+// SetFocusLabel sets what the focusable items are called in the navigation
+// hint, e.g. "comment".
+func (m *Model) SetFocusLabel(label string) {
+	m.focusLabel = label
+}
+
 // ResetFocus clears the focus, e.g. when showing different content.
 func (m *Model) ResetFocus() {
 	m.focus = -1
@@ -195,27 +243,36 @@ func (m Model) highlightFocused(view string) string {
 		title := it.start
 		// Comments start with a box around the author, whose title is on
 		// the line below the box's top border
+		boxed := false
 		if i := title - y; i >= 0 && i < len(lines) && strings.Contains(ansi.Strip(lines[i]), "╭") {
 			title++
+			boxed = true
 		}
 		if i := title - y; i >= 0 && i < len(lines) {
-			lines[i] = m.withTitleHint(lines[i])
+			hinted := m.withTitleHint(lines[i], boxed)
+			// A title filling the line, e.g. a commit's, leaves no room, so
+			// try the line below it, e.g. the commit's author
+			if hinted == lines[i] && i+1 < len(lines) && title+1 < it.end {
+				lines[i+1] = m.withTitleHint(lines[i+1], boxed)
+			} else {
+				lines[i] = hinted
+			}
 		}
 	}
 	return strings.Join(lines, "\n")
 }
 
 // withTitleHint places the focus hint at the right end of a comment's title
-// line: just inside the closing border of its box if it has one, otherwise
+// line: just inside the closing border of its box when boxed, otherwise
 // at the right edge of the content. The hint is left out if it would cover
 // text.
-func (m Model) withTitleHint(line string) string {
+func (m Model) withTitleHint(line string, boxed bool) string {
 	hint := lipgloss.NewStyle().Foreground(m.ctx.Theme.FaintText).Render(m.focusHint)
 	hintWidth := lipgloss.Width(hint)
 
 	plain := ansi.Strip(line)
 	end := m.viewport.Width() - m.ctx.Styles.Sidebar.ContentPadding
-	if i := strings.LastIndex(plain, "│"); i >= 0 {
+	if i := strings.LastIndex(plain, "│"); boxed && i >= 0 {
 		// Just inside the box's right border, leaving a space before it
 		end = ansi.StringWidth(plain[:i]) - 1
 	}

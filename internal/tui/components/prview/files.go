@@ -52,8 +52,46 @@ func (m *Model) renderChangesOverview() string {
 }
 
 func (m *Model) renderChangedFiles() string {
-	files := make([]string, 0)
-	for _, file := range m.pr.Data.Enriched.Files.Nodes {
+	if m.commitFiles != nil {
+		return m.renderCommitFiles()
+	}
+	return m.renderFiles(m.pr.Data.Enriched.Files.Nodes)
+}
+
+// renderCommitFiles renders the files changed by the commit the files tab
+// was narrowed to.
+func (m *Model) renderCommitFiles() string {
+	faint := m.ctx.Styles.Common.FaintTextStyle
+	cf := m.commitFiles
+	switch {
+	case cf.loading:
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			m.ctx.Styles.Common.WaitingGlyph, " ",
+			faint.Render(fmt.Sprintf("Loading files of %s...", cf.abbreviatedOid)))
+	case cf.err != nil:
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			m.ctx.Styles.Common.FailureGlyph, " ",
+			faint.Render(fmt.Sprintf("Failed loading files of %s: %v", cf.abbreviatedOid, cf.err)))
+	}
+
+	additions, deletions := 0, 0
+	for _, f := range cf.files {
+		additions += f.Additions
+		deletions += f.Deletions
+	}
+	heading := m.ctx.Styles.Common.MainTextStyle.MarginBottom(1).Render(lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		lipgloss.NewStyle().Underline(true).Render(
+			fmt.Sprintf("%d files changed in %s", len(cf.files), cf.abbreviatedOid)),
+		" ",
+		m.renderDiffStats(additions, deletions),
+	))
+	return lipgloss.JoinVertical(lipgloss.Left, heading, m.renderFiles(cf.files))
+}
+
+func (m *Model) renderFiles(changed []data.ChangedFile) string {
+	files := make([]string, 0, len(changed))
+	for _, file := range changed {
 		files = append(files, m.renderFile(file))
 	}
 

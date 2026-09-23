@@ -9,6 +9,18 @@ type CommentAnchor struct {
 	Author string
 	// Body is the comment's markdown
 	Body string
+	// Commit is set when the anchor is a commit rather than a comment: the
+	// index of the commit in the PR's commits
+	Commit *int
+	// Check is set when the anchor is a check rather than a comment: the
+	// index of the check in the PR's checks as they're listed
+	Check *int
+}
+
+// IsComment reports whether the anchor is a comment, rather than e.g. a
+// commit or a check.
+func (a CommentAnchor) IsComment() bool {
+	return a.Commit == nil && a.Check == nil
 }
 
 // QuoteReply quotes a comment's markdown the way GitHub's "Quote reply"

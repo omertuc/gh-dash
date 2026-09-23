@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -43,6 +44,29 @@ type Model struct {
 	focus int
 	// focusHint is shown on the focused item's title line
 	focusHint string
+	// focusLabel is what the focusable items are called, e.g. "comment"
+	focusLabel string
+
+	// actionHints are shown in a bar above the content, most important first
+	actionHints []ActionHint
+
+	// searching is whether the search query is being typed in searchInput
+	searching   bool
+	searchInput textinput.Model
+	// searchQuery is what's searched for in the content, found at
+	// searchMatches, of which searchCurrent is the one moved to last
+	searchQuery   string
+	searchMatches []searchMatch
+	searchCurrent int
+	// searchOrigin is the scroll position when the search started
+	searchOrigin int
+}
+
+// ActionHint describes a key that acts on what's shown, e.g. "D" to mark a
+// notification as done.
+type ActionHint struct {
+	Key   string
+	Label string
 }
 
 func NewModel() Model {
@@ -52,12 +76,13 @@ func NewModel() Model {
 	)
 
 	return Model{
-		IsOpen:     false,
-		data:       "",
-		viewport:   vp,
-		ctx:        nil,
-		emptyState: "Nothing selected...",
-		focus:      -1,
+		IsOpen:        false,
+		data:          "",
+		viewport:      vp,
+		ctx:           nil,
+		emptyState:    "Nothing selected...",
+		focus:         -1,
+		searchCurrent: -1,
 	}
 }
 
@@ -113,15 +138,61 @@ func (m Model) View() string {
 }
 
 func (m Model) renderContent() string {
-	parts := []string{m.highlightFocused(m.viewport.View())}
+	parts := []string{m.highlightFocused(m.highlightMatches(m.viewport.View()))}
 	if m.footer != "" {
 		parts = append(parts, m.footer)
 	}
-	parts = append(parts, m.renderPager())
+	if m.searching {
+		parts = append(parts, m.renderSearchInput())
+	} else {
+		parts = append(parts, m.renderPager())
+	}
 	if m.headerIsSticky {
 		parts = append([]string{trimTrailingBlankLines(m.header), m.renderScrolledIndicator()}, parts...)
 	}
+	if len(m.actionHints) > 0 {
+		parts = append([]string{m.renderActionBar()}, parts...)
+	}
 	return lipgloss.JoinVertical(lipgloss.Top, parts...)
+}
+
+// renderActionBar renders the action hints on one line, e.g. "D done · u
+// unsubscribe". Hints that don't fit the width are dropped, least important
+// first, and then the help key is pointed to for the rest.
+func (m Model) renderActionBar() string {
+	const separator = " · "
+	padding := m.ctx.Styles.Sidebar.ContentPadding
+	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(m.ctx.Theme.SecondaryText)
+	labelStyle := lipgloss.NewStyle().Foreground(m.ctx.Theme.FaintText)
+	render := func(h ActionHint) string {
+		return keyStyle.Render(h.Key) + " " + labelStyle.Render(h.Label)
+	}
+
+	fit := func(width int) []string {
+		var parts []string
+		used := 0
+		for _, h := range m.actionHints {
+			w := lipgloss.Width(h.Key + " " + h.Label)
+			if len(parts) > 0 {
+				w += lipgloss.Width(separator)
+			}
+			if used+w > width {
+				break
+			}
+			used += w
+			parts = append(parts, render(h))
+		}
+		return parts
+	}
+
+	width := m.viewport.Width() - padding
+	parts := fit(width)
+	if len(parts) < len(m.actionHints) {
+		more := ActionHint{keys.HintKeys(keys.Keys.Help), "more"}
+		parts = append(fit(width-lipgloss.Width(separator+more.Key+" "+more.Label)), render(more))
+	}
+	return lipgloss.NewStyle().PaddingLeft(padding).MaxWidth(m.viewport.Width()).
+		Render(strings.Join(parts, labelStyle.Render(separator)))
 }
 
 // renderScrolledIndicator renders the line between a sticky header and the
@@ -162,12 +233,16 @@ func (m Model) contentHeightForViewport() int {
 }
 
 // availableHeight is the height left for the header and content after the
-// footer.
+// action bar and the footer.
 func (m Model) availableHeight() int {
-	if m.footer == "" {
-		return m.contentHeight
+	height := m.contentHeight
+	if len(m.actionHints) > 0 {
+		height--
 	}
-	return m.contentHeight - lipgloss.Height(m.footer)
+	if m.footer != "" {
+		height -= lipgloss.Height(m.footer)
+	}
+	return height
 }
 
 // stickyHeader reports whether the header is shown fixed above the content.
@@ -193,6 +268,9 @@ func (m Model) renderPager() string {
 		label := "scroll"
 		if len(m.anchors) > 0 {
 			label = "comment"
+			if m.focusLabel != "" {
+				label = m.focusLabel
+			}
 		}
 		hints = append(hints, hint{pairHint(keys.Keys.Up, keys.Keys.Down, label), 1})
 	}
@@ -204,6 +282,12 @@ func (m Model) renderPager() string {
 	}
 	if m.navKeysScroll {
 		hints = append(hints, hint{keys.HintKeys(keys.NotificationKeys.BackToNotification) + " dismiss", 0})
+	}
+	if m.HasSearch() {
+		hints = append([]hint{{
+			m.searchStatus() + " " + pairHint(keys.NotificationKeys.PrevMatch, keys.NotificationKeys.NextMatch, ""),
+			0,
+		}}, hints...)
 	}
 
 	const separator = " · "
@@ -249,7 +333,15 @@ func (m *Model) SetNavKeysScroll(navKeysScroll bool) {
 }
 
 func (m *Model) SetContent(data string) {
+	m.actionHints = nil
 	m.SetContentWithHeader("", data, "", nil)
+}
+
+// SetActionHints sets the keys shown in a bar above the content for acting
+// on it, most important first. Call it before setting the content, which
+// lays out the content around the bar.
+func (m *Model) SetActionHints(hints []ActionHint) {
+	m.actionHints = hints
 }
 
 // SetContentWithHeader sets content to scroll between a header and a footer
@@ -285,6 +377,7 @@ func (m *Model) layout() {
 	if content != m.viewportContent {
 		m.viewportContent = content
 		m.viewport.SetContent(content)
+		m.refreshSearch()
 	}
 }
 
