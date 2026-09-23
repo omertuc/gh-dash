@@ -2252,3 +2252,59 @@ func TestNotificationCommandTemplateVariables(t *testing.T) {
 		})
 	}
 }
+
+func TestNotificationView_NavigationKeysScrollOpenSubject(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	require.NoError(t, err)
+
+	ctx := &context.ProgramContext{
+		Config:            &cfg,
+		View:              config.NotificationsView,
+		MainContentHeight: 10,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	sidebarModel := sidebar.NewModel()
+	sidebarModel.IsOpen = true
+	sidebarModel.UpdateProgramContext(ctx)
+	sidebarModel.SetContent(strings.Repeat("line\n", 100))
+
+	m := Model{
+		ctx:              ctx,
+		keys:             keys.Keys,
+		prView:           prview.NewModel(ctx),
+		sidebar:          sidebarModel,
+		issueSidebar:     issueview.NewModel(ctx),
+		notificationView: notificationview.NewModel(ctx),
+	}
+	m.notificationView.SetSubjectPR(&prrow.Data{}, "test-notification-id")
+
+	press := func(k string) {
+		msg := tea.KeyPressMsg{Text: k}
+		if k == "home" {
+			msg = tea.KeyPressMsg{Code: tea.KeyHome}
+		}
+		m.Update(msg)
+		require.NotNil(t, m.notificationView.GetSubjectPR(),
+			"pressing %q should not close the open notification", k)
+	}
+
+	press("j")
+	press("j")
+	require.Equal(t, 2*previewScrollLines, m.sidebar.YOffset(), "j should scroll down a few lines")
+
+	press("k")
+	require.Equal(t, previewScrollLines, m.sidebar.YOffset(), "k should scroll up a few lines")
+
+	press("G")
+	bottom := m.sidebar.YOffset()
+	require.Greater(t, bottom, previewScrollLines, "G should scroll to the bottom")
+
+	// The test config binds "g" to a custom command, so use its alias
+	press("home")
+	require.Equal(t, 0, m.sidebar.YOffset(), "home should scroll to the top")
+}

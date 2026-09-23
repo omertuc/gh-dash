@@ -276,6 +276,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd = m.onViewedRowChanged()
 			}
 
+		// With a notification's PR/Issue open, navigation keys scroll within it
+		// rather than moving to another notification, which would close it.
+		// Esc goes back to the notification list.
+		case m.isNotificationSubjectShown() && (key.Matches(msg, m.keys.Down) ||
+			key.Matches(msg, m.keys.Up) || key.Matches(msg, m.keys.FirstLine) ||
+			key.Matches(msg, m.keys.LastLine)):
+			switch {
+			case key.Matches(msg, m.keys.Down):
+				m.sidebar.ScrollDown(previewScrollLines)
+			case key.Matches(msg, m.keys.Up):
+				m.sidebar.ScrollUp(previewScrollLines)
+			case key.Matches(msg, m.keys.FirstLine):
+				m.sidebar.ScrollToTop()
+			case key.Matches(msg, m.keys.LastLine):
+				m.sidebar.ScrollToBottom()
+			}
+
 		case key.Matches(msg, m.keys.Down):
 			if currSection != nil {
 				prevRow := currSection.CurrRow()
@@ -979,6 +996,7 @@ func (m *Model) View() tea.View {
 		s.WriteString(m.tabs.View())
 	}
 	s.WriteString("\n")
+	m.sidebar.SetNavKeysScroll(m.isNotificationSubjectShown())
 	var content string
 	currSection := m.getCurrSection()
 	if currSection != nil {
@@ -1276,6 +1294,17 @@ func (m *Model) openSidebarForInput(setFunc func(bool) tea.Cmd) tea.Cmd {
 	m.syncSidebar()
 	m.sidebar.ScrollToBottom()
 	return cmd
+}
+
+// previewScrollLines is how far the navigation keys scroll an open
+// notification's preview.
+const previewScrollLines = 3
+
+// isNotificationSubjectShown reports whether a notification's PR or Issue is
+// open in the preview.
+func (m *Model) isNotificationSubjectShown() bool {
+	return m.ctx.View == config.NotificationsView && m.sidebar.IsOpen &&
+		(m.notificationView.GetSubjectPR() != nil || m.notificationView.GetSubjectIssue() != nil)
 }
 
 func (m *Model) backToNotification() tea.Cmd {
