@@ -2308,3 +2308,77 @@ func TestNotificationView_NavigationKeysScrollOpenSubject(t *testing.T) {
 	press("home")
 	require.Equal(t, 0, m.sidebar.YOffset(), "home should scroll to the top")
 }
+
+func TestHelpClosesWithQAndEscInsteadOfTheirUsualAction(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	require.NoError(t, err)
+
+	ctx := &context.ProgramContext{
+		Config: &cfg,
+		View:   config.NotificationsView,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	m := Model{
+		ctx:              ctx,
+		keys:             keys.Keys,
+		prView:           prview.NewModel(ctx),
+		sidebar:          sidebar.NewModel(),
+		issueSidebar:     issueview.NewModel(ctx),
+		notificationView: notificationview.NewModel(ctx),
+		footer:           footer.NewModel(ctx),
+	}
+	m.notificationView.SetSubjectPR(&prrow.Data{}, "test-notification-id")
+
+	for _, k := range []tea.KeyPressMsg{{Text: "q"}, {Code: tea.KeyEscape}} {
+		m.footer.ShowAll = true
+		_, cmd := m.Update(k)
+		require.False(t, m.footer.ShowAll, "%q should close the help", k.String())
+		require.Nil(t, cmd, "%q should only close the help, not quit", k.String())
+		require.NotNil(t, m.notificationView.GetSubjectPR(),
+			"%q should not also go back from the open notification", k.String())
+	}
+}
+
+func TestNotificationView_SectionKeysSwitchOpenPRTabs(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	require.NoError(t, err)
+
+	ctx := &context.ProgramContext{
+		Config:            &cfg,
+		View:              config.NotificationsView,
+		MainContentHeight: 10,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	sidebarModel := sidebar.NewModel()
+	sidebarModel.IsOpen = true
+	sidebarModel.UpdateProgramContext(ctx)
+
+	m := Model{
+		ctx:              ctx,
+		keys:             keys.Keys,
+		prView:           prview.NewModel(ctx),
+		sidebar:          sidebarModel,
+		issueSidebar:     issueview.NewModel(ctx),
+		notificationView: notificationview.NewModel(ctx),
+	}
+	m.notificationView.SetSubjectPR(&prrow.Data{}, "test-notification-id")
+
+	initialTab := m.prView.SelectedTab()
+	m.Update(tea.KeyPressMsg{Text: "l"})
+	require.NotEqual(t, initialTab, m.prView.SelectedTab(), "l should move to the next tab")
+	require.NotNil(t, m.notificationView.GetSubjectPR(), "l should not close the notification")
+
+	m.Update(tea.KeyPressMsg{Text: "h"})
+	require.Equal(t, initialTab, m.prView.SelectedTab(), "h should move back to the previous tab")
+	require.NotNil(t, m.notificationView.GetSubjectPR(), "h should not close the notification")
+}

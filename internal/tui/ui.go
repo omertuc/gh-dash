@@ -241,6 +241,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// While the help is open, q and esc close it instead of quitting or
+		// going back. Ctrl+c still quits.
+		if m.footer.ShowAll && msg.String() != "ctrl+c" &&
+			(key.Matches(msg, m.keys.Quit) || msg.String() == "esc") {
+			m.footer.ShowAll = false
+			m.syncMainContentDimensions()
+			return m, nil
+		}
+
 		switch {
 		case m.isUserDefinedKeybinding(msg):
 			cmd = m.executeKeybinding(msg.String())
@@ -260,6 +269,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.SectionMode):
 			m.mode = ModeSection
+
+		// With a notification's PR open, h/l switch its tabs rather than moving
+		// to another section, which would close it
+		case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+			(key.Matches(msg, m.keys.PrevSection) || key.Matches(msg, m.keys.NextSection)):
+			if key.Matches(msg, m.keys.PrevSection) {
+				m.prView.PrevTab()
+			} else {
+				m.prView.NextTab()
+			}
+			m.syncSidebar()
 
 		case key.Matches(msg, m.keys.PrevSection):
 			prevSection := m.getSectionAt(m.getPrevSectionId())
