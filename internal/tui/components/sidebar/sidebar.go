@@ -1,7 +1,6 @@
 package sidebar
 
 import (
-	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -10,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
@@ -21,6 +21,15 @@ type Model struct {
 	viewport   viewport.Model
 	ctx        *context.ProgramContext
 	emptyState string
+
+	// header is shown above the scrolling content and doesn't scroll with it
+	header string
+	body   string
+	// headerIsSticky is whether the viewport content was laid out with the
+	// header fixed above it (true) or scrolling along with it (false)
+	headerIsSticky bool
+	// contentHeight is the height available for the header and content
+	contentHeight int
 
 	navKeysScroll bool
 }
@@ -73,11 +82,7 @@ func (m Model) View() string {
 			)
 		}
 
-		return style.Render(lipgloss.JoinVertical(
-			lipgloss.Top,
-			m.viewport.View(),
-			m.renderPager(),
-		))
+		return style.Render(m.renderContent())
 	}
 
 	// Right mode
@@ -92,11 +97,59 @@ func (m Model) View() string {
 		)
 	}
 
-	return style.Render(lipgloss.JoinVertical(
-		lipgloss.Top,
-		m.viewport.View(),
-		m.renderPager(),
-	))
+	return style.Render(m.renderContent())
+}
+
+func (m Model) renderContent() string {
+	parts := []string{m.viewport.View(), m.renderPager()}
+	if m.headerIsSticky {
+		parts = append([]string{trimTrailingBlankLines(m.header), m.renderScrolledIndicator()}, parts...)
+	}
+	return lipgloss.JoinVertical(lipgloss.Top, parts...)
+}
+
+// renderScrolledIndicator renders the line between a sticky header and the
+// content, which shows an arrow when there's more content scrolled out of
+// view above. The line is always there so the layout doesn't shift.
+func (m Model) renderScrolledIndicator() string {
+	indicator := ""
+	if !m.viewport.AtTop() {
+		indicator = "▲"
+	}
+	return lipgloss.NewStyle().
+		Width(m.viewport.Width()).
+		Align(lipgloss.Center).
+		Foreground(m.ctx.Theme.FaintText).
+		Render(indicator)
+}
+
+// stickyHeaderHeight is the height taken above the content by a sticky
+// header: the header itself, without trailing blank lines since the
+// indicator line separates it from the content, plus the indicator line.
+func (m Model) stickyHeaderHeight() int {
+	return lipgloss.Height(trimTrailingBlankLines(m.header)) + 1
+}
+
+func trimTrailingBlankLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for len(lines) > 1 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) contentHeightForViewport() int {
+	if m.headerIsSticky {
+		return m.contentHeight - m.stickyHeaderHeight()
+	}
+	return m.contentHeight
+}
+
+// stickyHeader reports whether the header is shown fixed above the content.
+// A header taking most of the space would leave too little room to scroll, so
+// then it scrolls along with the content instead.
+func (m Model) stickyHeader() bool {
+	return m.header != "" && m.stickyHeaderHeight() <= m.contentHeight/2
 }
 
 // renderPager renders the scroll percentage followed by hints for the keys
@@ -121,7 +174,7 @@ func (m Model) renderPager() string {
 		hints = append(hints, hint{pairHint(keys.Keys.FirstLine, keys.Keys.LastLine, ""), 3})
 	}
 	if m.navKeysScroll {
-		hints = append(hints, hint{bindingKeys(keys.NotificationKeys.BackToNotification) + " dismiss", 0})
+		hints = append(hints, hint{keys.HintKeys(keys.NotificationKeys.BackToNotification) + " dismiss", 0})
 	}
 
 	const separator = " · "
@@ -153,70 +206,11 @@ func (m Model) renderPager() string {
 // pairHint describes a pair of up/down bindings followed by a label, e.g.
 // "k/↑ j/↓ scroll".
 func pairHint(up, down key.Binding, label string) string {
-	keysText := combinedBindingKeys(up, down)
+	keysText := keys.HintKeyPair(up, down)
 	if label == "" {
 		return keysText
 	}
 	return keysText + " " + label
-}
-
-// combinedBindingKeys lists the keys of an up/down pair, sharing a common
-// modifier to save space, e.g. "Ctrl+u/d" rather than "Ctrl+u Ctrl+d".
-func combinedBindingKeys(up, down key.Binding) string {
-	upName, downName := bindingKeys(up), bindingKeys(down)
-	i := strings.LastIndex(upName, "+")
-	if len(up.Keys()) == 1 && len(down.Keys()) == 1 && i > 0 &&
-		strings.HasPrefix(downName, upName[:i+1]) {
-		return upName + "/" + downName[i+1:]
-	}
-	return upName + " " + downName
-}
-
-// bindingKeys lists all of a binding's keys, e.g. "k/↑".
-func bindingKeys(b key.Binding) string {
-	var names []string
-	for _, k := range b.Keys() {
-		names = append(names, keyName(k))
-	}
-	// Show plain characters first since they're what people usually type,
-	// then symbols like arrows, then named keys
-	slices.SortStableFunc(names, func(a, b string) int {
-		return cmp.Compare(keyNameRank(a), keyNameRank(b))
-	})
-	return strings.Join(names, "/")
-}
-
-func keyNameRank(name string) int {
-	switch {
-	case len(name) == 1:
-		return 0
-	case len([]rune(name)) == 1:
-		return 1
-	}
-	return 2
-}
-
-var specialKeyNames = map[string]string{
-	"up":     "↑",
-	"down":   "↓",
-	"left":   "←",
-	"right":  "→",
-	"pgup":   "PgUp",
-	"pgdown": "PgDn",
-}
-
-// keyName formats a key for display, e.g. "ctrl+d" as "Ctrl+d" and "up" as "↑".
-func keyName(k string) string {
-	if name, ok := specialKeyNames[k]; ok {
-		return name
-	}
-	parts := strings.Split(k, "+")
-	for i, part := range parts {
-		if len([]rune(part)) > 1 {
-			parts[i] = strings.ToUpper(part[:1]) + part[1:]
-		}
-	}
-	return strings.Join(parts, "+")
 }
 
 // SetNavKeysScroll sets whether the navigation keys (j/k, g/G) scroll the
@@ -226,8 +220,31 @@ func (m *Model) SetNavKeysScroll(navKeysScroll bool) {
 }
 
 func (m *Model) SetContent(data string) {
-	m.data = data
-	m.viewport.SetContent(data)
+	m.SetContentWithHeader("", data)
+}
+
+// SetContentWithHeader sets content to scroll below a header that stays in
+// place.
+func (m *Model) SetContentWithHeader(header, data string) {
+	m.header = header
+	m.body = data
+	m.data = header + data
+	m.layout()
+}
+
+// layout sizes the viewport and fills it, with the header either fixed above
+// it or, when there's not enough room for that, scrolling along with it.
+func (m *Model) layout() {
+	m.headerIsSticky = m.stickyHeader()
+	height := m.contentHeight
+	content := m.body
+	if m.headerIsSticky {
+		height -= m.stickyHeaderHeight()
+	} else if m.header != "" {
+		content = lipgloss.JoinVertical(lipgloss.Left, m.header, m.body)
+	}
+	m.viewport.SetHeight(max(0, height))
+	m.viewport.SetContent(content)
 }
 
 func (m *Model) GetSidebarContentWidth() int {
@@ -272,9 +289,14 @@ func (m *Model) UpdateProgramContext(ctx *context.ProgramContext) {
 	}
 	m.ctx = ctx
 	if m.ctx.PreviewPosition == "bottom" {
-		m.viewport.SetHeight(m.ctx.DynamicPreviewHeight - m.ctx.Styles.Sidebar.PagerHeight)
+		m.contentHeight = m.ctx.DynamicPreviewHeight - m.ctx.Styles.Sidebar.PagerHeight
 	} else {
-		m.viewport.SetHeight(m.ctx.MainContentHeight - m.ctx.Styles.Sidebar.PagerHeight)
+		m.contentHeight = m.ctx.MainContentHeight - m.ctx.Styles.Sidebar.PagerHeight
+	}
+	if m.header != "" && m.stickyHeader() != m.headerIsSticky {
+		m.layout()
+	} else {
+		m.viewport.SetHeight(max(0, m.contentHeightForViewport()))
 	}
 	m.viewport.SetWidth(m.GetSidebarContentWidth())
 }

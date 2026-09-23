@@ -124,6 +124,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd, *IssueAction) {
 }
 
 func (m Model) View() string {
+	return m.ViewHeader() + "\n" + m.ViewBody()
+}
+
+// ViewHeader renders the top of the preview: the issue's name, title, status
+// and author.
+func (m Model) ViewHeader() string {
 	s := strings.Builder{}
 
 	s.WriteString(m.renderFullNameAndNumber())
@@ -134,7 +140,15 @@ func (m Model) View() string {
 	s.WriteString(m.renderStatusPill())
 	s.WriteString("\n\n")
 	s.WriteString(m.renderAuthor())
-	s.WriteString("\n\n")
+
+	// End with a blank line to separate the header from the body
+	return m.contentStyle().Render(s.String()) + "\n"
+}
+
+// ViewBody renders the rest of the preview below the header: labels, the
+// issue's description and its comments.
+func (m Model) ViewBody() string {
+	s := strings.Builder{}
 
 	labels := m.renderLabels()
 	if labels != "" {
@@ -150,7 +164,11 @@ func (m Model) View() string {
 		s.WriteString(m.ctx.Styles.Sidebar.InputBox.Render(m.editor.View()))
 	}
 
-	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(s.String())
+	return m.contentStyle().Render(s.String())
+}
+
+func (m Model) contentStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding)
 }
 
 func (m *Model) ViewCompletions() string {

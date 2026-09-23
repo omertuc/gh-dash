@@ -816,13 +816,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// (indicates there's new activity to show)
 			if msg.LatestCommentUrl != "" {
 				m.prView.GoToActivityTab()
-				m.sidebar.SetContent(m.prView.View())
+				m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
 				m.sidebar.ScrollToBottom()
 			} else {
 				// For notifications without comments (new PRs, state changes, etc.)
 				// show the Overview tab without scrolling
 				m.prView.GoToFirstTab()
-				m.sidebar.SetContent(m.prView.View())
+				m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
 			}
 			m.markNotificationAsRead(msg.NotificationId)
 		} else {
@@ -838,7 +838,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.issueSidebar.SetSectionId(0)
 			m.issueSidebar.SetRow(m.notificationView.GetSubjectIssue())
 			m.issueSidebar.SetWidth(width)
-			m.sidebar.SetContent(m.issueSidebar.View())
+			m.sidebar.SetContentWithHeader(m.issueSidebar.ViewHeader(), m.issueSidebar.ViewBody())
 			// Scroll to bottom if there's a latest comment (indicates new activity)
 			if msg.LatestCommentUrl != "" {
 				m.sidebar.ScrollToBottom()
@@ -1348,7 +1348,7 @@ func (m *Model) syncSidebar() tea.Cmd {
 		m.prView.SetSectionId(m.currSectionId)
 		m.prView.SetRow(row)
 		m.prView.SetWidth(width)
-		m.sidebar.SetContent(m.prView.View())
+		m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
 		// Scroll to bottom if in input mode to keep inputbox visible
 		if m.prView.IsTextInputBoxFocused() {
 			m.sidebar.ScrollToBottom()
@@ -1357,7 +1357,7 @@ func (m *Model) syncSidebar() tea.Cmd {
 		m.issueSidebar.SetSectionId(m.currSectionId)
 		m.issueSidebar.SetRow(row)
 		m.issueSidebar.SetWidth(width)
-		m.sidebar.SetContent(m.issueSidebar.View())
+		m.sidebar.SetContentWithHeader(m.issueSidebar.ViewHeader(), m.issueSidebar.ViewBody())
 		// Scroll to bottom if in input mode to keep inputbox visible
 		if m.issueSidebar.IsTextInputBoxFocused() {
 			m.sidebar.ScrollToBottom()
@@ -1372,7 +1372,7 @@ func (m *Model) syncSidebar() tea.Cmd {
 				m.prView.SetSectionId(0)
 				m.prView.SetRow(m.notificationView.GetSubjectPR())
 				m.prView.SetWidth(width)
-				m.sidebar.SetContent(m.prView.View())
+				m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
 				// Scroll to bottom if in input mode to keep inputbox visible
 				if m.prView.IsTextInputBoxFocused() {
 					m.sidebar.ScrollToBottom()
@@ -1381,7 +1381,7 @@ func (m *Model) syncSidebar() tea.Cmd {
 				m.issueSidebar.SetSectionId(0)
 				m.issueSidebar.SetRow(m.notificationView.GetSubjectIssue())
 				m.issueSidebar.SetWidth(width)
-				m.sidebar.SetContent(m.issueSidebar.View())
+				m.sidebar.SetContentWithHeader(m.issueSidebar.ViewHeader(), m.issueSidebar.ViewBody())
 				// Scroll to bottom if in input mode to keep inputbox visible
 				if m.issueSidebar.IsTextInputBoxFocused() {
 					m.sidebar.ScrollToBottom()

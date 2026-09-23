@@ -2,8 +2,11 @@ package prview
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
 )
@@ -27,5 +30,25 @@ func BenchmarkActivityView(b *testing.B) {
 	m.GoToActivityTab()
 	for b.Loop() {
 		_ = m.View()
+	}
+}
+
+func TestTabsHintShownWhenItFits(t *testing.T) {
+	m := newTestModelWithWidth(t, &data.PullRequestData{Title: "hint"}, nil, nil, 0)
+
+	m.SetWidth(120)
+	header := ansi.Strip(m.ViewHeader())
+	if !strings.Contains(header, "]→ [←") {
+		t.Fatalf("expected tabs hint in wide header:\n%s", header)
+	}
+	for _, line := range strings.Split(header, "\n") {
+		if strings.Contains(line, "]→ [←") && ansi.StringWidth(line) > 120 {
+			t.Fatalf("tab bar is wider than the preview: %d", ansi.StringWidth(line))
+		}
+	}
+
+	m.SetWidth(m.carousel.ItemsWidth() + 3)
+	if strings.Contains(ansi.Strip(m.ViewHeader()), "]→ [←") {
+		t.Fatal("hint should be dropped when it doesn't fit next to all tabs")
 	}
 }

@@ -288,6 +288,20 @@ func (m *Model) UpdateContent() {
 		lipgloss.JoinHorizontal(lipgloss.Center, loIndicator, itemsContent, roIndicator))
 }
 
+// ItemsWidth returns the width needed to show every item without truncating
+// or scrolling.
+func (m Model) ItemsWidth() int {
+	width := 0
+	for i, item := range m.items {
+		width += max(lipgloss.Width(m.styles.Item.Render(item)),
+			lipgloss.Width(m.styles.Selected.Render(item)))
+		if m.showSeparators && i != len(m.items)-1 {
+			width += lipgloss.Width(m.styles.Separator.Render(m.separator))
+		}
+	}
+	return width
+}
+
 // SelectedItem returns the selected item.
 func (m Model) SelectedItem() string {
 	return m.items[m.cursor]

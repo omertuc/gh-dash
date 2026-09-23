@@ -85,3 +85,62 @@ func TestPagerDropsLeastImportantHintsWhenNarrow(t *testing.T) {
 		t.Errorf("width 36: got %q", got)
 	}
 }
+
+func TestStickyHeaderStaysWhileContentScrolls(t *testing.T) {
+	m := newTestSidebar(0)
+	m.SetContentWithHeader("HEADER 1\nHEADER 2", strings.TrimSuffix(strings.Repeat("line\n", 50), "\n"))
+
+	// Two header lines plus the scrolled indicator line
+	if got := m.viewport.Height(); got != m.contentHeight-3 {
+		t.Fatalf("viewport height = %d, want %d (room left below the header)", got, m.contentHeight-3)
+	}
+
+	for _, scroll := range []func(){m.ScrollToTop, func() { m.ScrollDown(5) }, m.ScrollToBottom} {
+		scroll()
+		lines := strings.Split(ansi.Strip(m.renderContent()), "\n")
+		if strings.TrimSpace(lines[0]) != "HEADER 1" || strings.TrimSpace(lines[1]) != "HEADER 2" {
+			t.Fatalf("header not at the top after scrolling: %q", lines[:3])
+		}
+	}
+}
+
+func TestTallHeaderScrollsWithContent(t *testing.T) {
+	m := newTestSidebar(0)
+	header := strings.TrimSuffix(strings.Repeat("HEADER\n", 8), "\n")
+	m.SetContentWithHeader(header, strings.TrimSuffix(strings.Repeat("line\n", 50), "\n"))
+
+	if m.headerIsSticky {
+		t.Fatal("a header taking most of the space should not be sticky")
+	}
+	if got := m.viewport.Height(); got != m.contentHeight {
+		t.Fatalf("viewport height = %d, want the full %d", got, m.contentHeight)
+	}
+	m.ScrollToBottom()
+	if strings.Contains(ansi.Strip(m.viewport.View()), "HEADER") {
+		t.Fatal("a non-sticky header should scroll out of view")
+	}
+}
+
+func TestScrolledIndicatorShowsWhenNotAtTop(t *testing.T) {
+	m := newTestSidebar(0)
+	// A trailing blank line in the header is replaced by the indicator line
+	m.SetContentWithHeader("HEADER\n", strings.TrimSuffix(strings.Repeat("line\n", 50), "\n"))
+
+	indicatorLine := func() string {
+		return strings.TrimSpace(strings.Split(ansi.Strip(m.renderContent()), "\n")[1])
+	}
+
+	m.ScrollToTop()
+	if got := indicatorLine(); got != "" {
+		t.Errorf("at top: indicator line = %q, want blank", got)
+	}
+
+	m.ScrollDown(1)
+	if got := indicatorLine(); got != "▲" {
+		t.Errorf("scrolled: indicator line = %q, want ▲", got)
+	}
+
+	if got := m.viewport.Height(); got != m.contentHeight-2 {
+		t.Errorf("viewport height = %d, want %d", got, m.contentHeight-2)
+	}
+}

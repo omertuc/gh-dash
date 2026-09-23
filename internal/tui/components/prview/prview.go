@@ -38,6 +38,7 @@ type Model struct {
 	pr              *prrow.PullRequest
 	width           int
 	carousel        carousel.Model
+	tabsHint        string
 	editor          cmpcontroller.Controller
 	summaryViewMore bool
 }
@@ -132,6 +133,15 @@ func (m Model) View() string {
 		return ""
 	}
 
+	return lipgloss.JoinVertical(lipgloss.Left, m.ViewHeader(), m.ViewBody())
+}
+
+// ViewBody renders the selected tab's content, without the header.
+func (m Model) ViewBody() string {
+	if !m.hasData() {
+		return ""
+	}
+
 	body := strings.Builder{}
 	switch m.carousel.SelectedItem() {
 	case tabs[0]:
@@ -148,10 +158,25 @@ func (m Model) View() string {
 		body.WriteString(m.renderChangedFiles())
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.viewHeader(),
-		lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(body.String()),
-	)
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(body.String())
+}
+
+// ViewHeader renders the part of the preview above the selected tab's
+// content: the PR's name, title, branches, author and the tab bar.
+func (m Model) ViewHeader() string {
+	if !m.hasData() {
+		return ""
+	}
+	return m.viewHeader()
+}
+
+// renderTabsHint renders a hint for the keys that switch tabs, e.g. "]→ [←",
+// shown at the right end of the tab bar.
+func (m *Model) renderTabsHint() string {
+	return lipgloss.NewStyle().
+		Foreground(m.ctx.Theme.FaintText).
+		Render(keys.HintKeys(keys.PRKeys.NextSidebarTab) + "→ " +
+			keys.HintKeys(keys.PRKeys.PrevSidebarTab) + "← ")
 }
 
 func (m *Model) viewHeader() string {
@@ -169,7 +194,7 @@ func (m *Model) viewHeader() string {
 	header.WriteString(lipgloss.NewStyle().Width(m.width).
 		Border(lipgloss.NormalBorder(), false, false, true, false).
 		BorderForeground(m.ctx.Theme.FaintBorder).
-		Render(m.carousel.View()),
+		Render(lipgloss.JoinHorizontal(lipgloss.Bottom, m.carousel.View(), m.tabsHint)),
 	)
 
 	header.WriteString("\n")
@@ -587,7 +612,12 @@ func (m *Model) EnrichCurrRow() tea.Cmd {
 
 func (m *Model) SetWidth(width int) {
 	m.width = width
-	m.carousel.SetWidth(width)
+	m.tabsHint = m.renderTabsHint()
+	// Only show the hint when it fits alongside all the tabs
+	if lipgloss.Width(m.tabsHint)+m.carousel.ItemsWidth() > width {
+		m.tabsHint = ""
+	}
+	m.carousel.SetWidth(width - lipgloss.Width(m.tabsHint))
 	m.editor.SetWidth(
 		m.getIndentedContentWidth() - m.ctx.Styles.Sidebar.InputBox.GetHorizontalFrameSize(),
 	)
