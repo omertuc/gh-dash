@@ -831,6 +831,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case notificationssection.UpdateNotificationCommentsMsg:
 		cmds = append(cmds, m.updateNotificationSections(msg))
 
+	case notificationssection.NotificationUpdatesBatchMsg:
+		for _, update := range msg.Updates {
+			cmds = append(cmds, m.updateNotificationSections(update))
+		}
+		// Wait for the next batch once here, not once per section
+		cmds = append(cmds, msg.Next())
+
 	case spinner.TickMsg:
 		if len(m.tasks) > 0 {
 			taskSpinner, internalTickCmd := m.taskSpinner.Update(msg)
@@ -1008,8 +1015,9 @@ func (m *Model) View() tea.View {
 		s.WriteString(m.footer.View())
 	}
 
+	base := zone.Scan(s.String())
 	layers := []*lipgloss.Layer{
-		lipgloss.NewLayer(zone.Scan(s.String())),
+		lipgloss.NewLayer(base),
 	}
 
 	if currSection != nil {
@@ -1031,6 +1039,13 @@ func (m *Model) View() tea.View {
 	if issueCmp != "" {
 		y := m.ctx.ScreenHeight - common.FooterHeight - m.issueSidebar.InputBoxLineFromButton() - common.InputBoxHeight - 6
 		layers = append(layers, lipgloss.NewLayer(issueCmp).X(previewPos.X+3).Y(y))
+	}
+
+	// Compositing re-parses the whole screen, so only pay for it when there
+	// are popups to overlay on top of the base layer.
+	if len(layers) == 1 {
+		v.SetContent(base)
+		return v
 	}
 
 	comp := lipgloss.NewCompositor(layers...)

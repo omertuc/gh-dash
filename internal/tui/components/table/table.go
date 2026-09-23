@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/dlvhdr/gh-dash/v4/internal/config"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/listviewport"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
@@ -27,6 +28,27 @@ type Model struct {
 	dimensions     constants.Dimensions
 	rowsViewport   listviewport.Model
 	ContentHeight  int // Optional: override content height (0 = use default from config)
+
+	// Render cache: rendering rows is expensive, so SyncViewPortContent only
+	// re-renders rows whose content or selection state changed since the last
+	// sync, and skips the viewport update entirely when nothing did.
+	renderedRows    []string
+	renderedSource  []Row
+	renderedCurrRow int
+	renderedKey     renderKey
+	hasRenderCache  bool
+}
+
+// renderKey captures everything outside of a row's own content that affects
+// how it renders. When it changes, every row must be re-rendered.
+type renderKey struct {
+	columnWidths      string
+	width             int
+	contentHeight     int
+	compact           bool
+	showSeparator     bool
+	config            *config.Config
+	hasDarkBackground bool
 }
 
 type Column struct {
@@ -152,9 +174,8 @@ func (m *Model) LastItem() int {
 	return currItem
 }
 
-func (m *Model) cacheColumnWidths() {
-	columns := m.renderHeaderColumns()
-	for i, col := range columns {
+func (m *Model) cacheColumnWidths(headerColumns []string) {
+	for i, col := range headerColumns {
 		if m.Columns[i].Hidden != nil && *m.Columns[i].Hidden {
 			continue
 		}
@@ -162,22 +183,90 @@ func (m *Model) cacheColumnWidths() {
 	}
 }
 
+func (m *Model) currentRenderKey(headerColumns []string) renderKey {
+	var widths strings.Builder
+	for _, col := range headerColumns {
+		fmt.Fprintf(&widths, "%d,", lipgloss.Width(col))
+	}
+	key := renderKey{
+		columnWidths:      widths.String(),
+		width:             m.dimensions.Width,
+		contentHeight:     m.ContentHeight,
+		config:            m.ctx.Config,
+		hasDarkBackground: m.ctx.HasDarkBackground,
+	}
+	if m.ctx.Config != nil && m.ctx.Config.Theme != nil {
+		key.compact = m.ctx.Config.Theme.Ui.Table.Compact
+		key.showSeparator = m.ctx.Config.Theme.Ui.Table.ShowSeparator
+	}
+	return key
+}
+
+// SyncViewPortContent brings the viewport in line with the current rows,
+// re-rendering only the rows that changed since the last sync.
 func (m *Model) SyncViewPortContent() {
 	headerColumns := m.renderHeaderColumns()
-	m.cacheColumnWidths()
-	renderedRows := make([]string, 0, len(m.Rows))
-	for i := range m.Rows {
-		renderedRows = append(renderedRows, m.renderRow(i, headerColumns))
+	m.cacheColumnWidths(headerColumns)
+	key := m.currentRenderKey(headerColumns)
+	currRow := m.rowsViewport.GetCurrItem()
+
+	fullRender := !m.hasRenderCache || key != m.renderedKey ||
+		len(m.renderedRows) != len(m.Rows)
+	changed := fullRender
+	if fullRender {
+		m.renderedRows = make([]string, len(m.Rows))
+		m.renderedSource = make([]Row, len(m.Rows))
 	}
 
-	m.rowsViewport.SyncViewPort(
-		lipgloss.JoinVertical(lipgloss.Left, renderedRows...),
-	)
+	for i := range m.Rows {
+		selectionChanged := currRow != m.renderedCurrRow &&
+			(i == currRow || i == m.renderedCurrRow)
+		if fullRender || selectionChanged || !rowEqual(m.renderedSource[i], m.Rows[i]) {
+			rendered := m.renderRow(i, headerColumns)
+			if fullRender || rendered != m.renderedRows[i] {
+				m.renderedRows[i] = rendered
+				changed = true
+			}
+			// Copy so in-place edits to the caller's row are still detected.
+			m.renderedSource[i] = append(Row(nil), m.Rows[i]...)
+		}
+	}
+
+	m.renderedCurrRow = currRow
+	m.renderedKey = key
+	m.hasRenderCache = true
+
+	if changed {
+		// A plain join is enough: listviewport pads every line to the viewport
+		// width, which is what lipgloss.JoinVertical's (much slower) padding did.
+		m.rowsViewport.SyncViewPort(strings.Join(m.renderedRows, "\n"))
+	}
+}
+
+func rowEqual(a, b Row) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Model) SetRows(rows []Row) {
 	m.Rows = rows
 	m.rowsViewport.SetNumItems(len(m.Rows))
+	m.SyncViewPortContent()
+}
+
+// SetRow replaces a single row and re-renders only that row.
+func (m *Model) SetRow(idx int, row Row) {
+	if idx < 0 || idx >= len(m.Rows) {
+		return
+	}
+	m.Rows[idx] = row
 	m.SyncViewPortContent()
 }
 

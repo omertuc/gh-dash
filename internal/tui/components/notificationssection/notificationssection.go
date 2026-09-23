@@ -289,8 +289,8 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 		case key.Matches(msg, keys.NotificationKeys.ToggleBookmark):
 			if notification := m.GetCurrNotification(); notification != nil {
 				data.GetBookmarkStore().ToggleBookmark(notification.GetId())
-				// Rebuild rows to update bookmark indicator
-				m.Table.SetRows(m.BuildRows())
+				// Re-render the row to update the bookmark indicator
+				m.syncRow(m.Table.GetCurrItem())
 			}
 			return m, nil
 
@@ -344,7 +344,7 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 				if !msg.Unread {
 					m.sessionMarkedRead[msg.Id] = true
 				}
-				m.Table.SetRows(m.BuildRows())
+				m.syncRow(i)
 				break
 			}
 		}
@@ -365,7 +365,7 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 					m.Notifications[i].GetSubjectType(),
 					msg.Actor,
 				)
-				m.Table.SetRows(m.BuildRows())
+				m.syncRow(i)
 				log.Debug("Updated notification", "id", msg.Id, "count",
 					msg.NewCommentsCount, "state", msg.SubjectState, "actor", msg.Actor)
 				break
@@ -377,8 +377,8 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 		log.Debug("UpdateNotificationUrlMsg received", "id", msg.Id, "url", msg.ResolvedUrl)
 		for i := range m.Notifications {
 			if m.Notifications[i].GetId() == msg.Id {
+				// The resolved URL isn't displayed, so there's nothing to re-render
 				m.Notifications[i].ResolvedUrl = msg.ResolvedUrl
-				m.Table.SetRows(m.BuildRows())
 				log.Debug("Updated notification URL", "id", msg.Id, "url", msg.ResolvedUrl)
 				break
 			}
@@ -402,7 +402,7 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 
 			// Start background fetches for comment counts (only for new notifications)
 			fetchCmds := m.fetchCommentCountsForNotifications(msg.Notifications)
-			cmd = tea.Batch(fetchCmds...)
+			cmd = batchNotificationUpdates(fetchCmds)
 		}
 
 	case ClearAllNotificationsMsg:
@@ -520,6 +520,17 @@ func (m Model) BuildRows() []table.Row {
 	}
 
 	return rows
+}
+
+// syncRow re-renders the table row for the notification at idx, leaving the
+// rest of the table untouched.
+func (m *Model) syncRow(idx int) {
+	if idx < 0 || idx >= len(m.Notifications) || idx >= len(m.Table.Rows) {
+		m.Table.SetRows(m.BuildRows())
+		return
+	}
+	notificationModel := notificationrow.Notification{Ctx: m.Ctx, Data: &m.Notifications[idx]}
+	m.Table.SetRow(idx, notificationModel.ToTableRow())
 }
 
 func (m *Model) NumRows() int {

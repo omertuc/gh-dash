@@ -3,6 +3,7 @@ package notificationssection
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -251,5 +252,46 @@ func TestUpdateNotificationKeepsCursorOnNewLastItem(t *testing.T) {
 
 	if got := current.GetId(); got != "notif-B" {
 		t.Fatalf("GetCurrNotification().GetId() = %q, want %q", got, "notif-B")
+	}
+}
+
+func TestNotificationUpdatesRerenderOnlyAffectedRow(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../../../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to parse config: %v", err)
+	}
+
+	ctx := &context.ProgramContext{
+		Config: &cfg,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	m := NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	m.Notifications = []notificationrow.Data{
+		{Notification: data.NotificationData{Id: "notif-A", Unread: true}},
+		{Notification: data.NotificationData{Id: "notif-B", Unread: true}},
+		{Notification: data.NotificationData{Id: "notif-C", Unread: true}},
+	}
+	m.Table.SetRows(m.BuildRows())
+	before := slices.Clone(m.Table.Rows)
+
+	m.Update(UpdateNotificationCommentsMsg{Id: "notif-B", NewCommentsCount: 3})
+	m.Update(UpdateNotificationReadStateMsg{Id: "notif-C", Unread: false})
+
+	expected := m.BuildRows()
+	for i := range expected {
+		if !slices.Equal(m.Table.Rows[i], expected[i]) {
+			t.Fatalf("row %d is stale after update", i)
+		}
+	}
+	if !slices.Equal(m.Table.Rows[0], before[0]) {
+		t.Fatal("unaffected row 0 changed")
+	}
+	if slices.Equal(m.Table.Rows[1], before[1]) || slices.Equal(m.Table.Rows[2], before[2]) {
+		t.Fatal("updated rows were not re-rendered")
 	}
 }

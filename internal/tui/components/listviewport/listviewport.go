@@ -1,6 +1,7 @@
 package listviewport
 
 import (
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
@@ -23,6 +24,28 @@ type Model struct {
 	LastUpdated     time.Time
 	CreatedAt       time.Time
 	ItemTypeLabel   string
+
+	// contentGen identifies the content last passed to SyncViewPort. It comes
+	// from a global counter so that no two copies of a Model ever share a
+	// generation for different content.
+	contentGen uint64
+	viewCache  *viewCache
+}
+
+var contentGenCounter atomic.Uint64
+
+type viewCacheKey struct {
+	contentGen    uint64
+	yOffset       int
+	xOffset       int
+	width, height int
+}
+
+// viewCache memoizes View, which is called on every frame but whose inputs
+// only change when the content, scroll position or size change.
+type viewCache struct {
+	key  viewCacheKey
+	view string
 }
 
 func NewModel(
@@ -46,6 +69,7 @@ func NewModel(
 		ItemTypeLabel: itemTypeLabel,
 		LastUpdated:   lastUpdated,
 		CreatedAt:     createdAt,
+		viewCache:     &viewCache{},
 	}
 	model.bottomBoundId = utils.Min(
 		model.NumCurrentItems-1,
@@ -69,6 +93,7 @@ func (m *Model) SetItemHeight(height int) {
 
 func (m *Model) SyncViewPort(content string) {
 	m.viewport.SetContent(content)
+	m.contentGen = contentGenCounter.Add(1)
 }
 
 func (m *Model) getNumPrsPerPage() int {
@@ -130,13 +155,30 @@ func (m *Model) SetDimensions(dimensions constants.Dimensions) {
 }
 
 func (m *Model) View() string {
+	key := viewCacheKey{
+		contentGen: m.contentGen,
+		yOffset:    m.viewport.YOffset(),
+		xOffset:    m.viewport.XOffset(),
+		width:      m.viewport.Width(),
+		height:     m.viewport.Height(),
+	}
+	if m.viewCache != nil && m.contentGen != 0 && m.viewCache.key == key {
+		return m.viewCache.view
+	}
+
 	viewport := m.viewport.View()
-	return lipgloss.NewStyle().
+	view := lipgloss.NewStyle().
 		Width(m.viewport.Width()).
 		MaxWidth(m.viewport.Width()).
 		Render(
 			viewport,
 		)
+	if m.viewCache == nil {
+		m.viewCache = &viewCache{}
+	}
+	m.viewCache.key = key
+	m.viewCache.view = view
+	return view
 }
 
 func (m *Model) UpdateProgramContext(ctx *context.ProgramContext) {
