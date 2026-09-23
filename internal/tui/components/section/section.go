@@ -179,6 +179,7 @@ type Table interface {
 	LastItem() int
 	FetchNextPageSectionRows() []tea.Cmd
 	BuildRows() []table.Row
+	SetRows(rows []table.Row)
 	ResetRows()
 	GetIsLoading() bool
 	SetIsLoading(val bool) tea.Cmd
@@ -464,6 +465,10 @@ func (m *BaseModel) View() string {
 				m.GetMainContent(),
 			),
 		)
+}
+
+func (m *BaseModel) SetRows(rows []table.Row) {
+	m.Table.SetRows(rows)
 }
 
 func (m *BaseModel) ResetRows() {

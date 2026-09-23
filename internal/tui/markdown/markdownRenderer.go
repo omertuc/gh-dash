@@ -17,7 +17,9 @@ var (
 )
 
 func InitializeMarkdownStyle(ctx *context.ProgramContext) {
-	if markdownStyle != nil && markdownStyleSource == "bubbletea" {
+	// Don't let a less reliable source override what the terminal reported.
+	if markdownStyle != nil && markdownStyleSource == "bubbletea" &&
+		(ctx == nil || ctx.BackgroundSource != "bubbletea") {
 		log.Debugf("InitializeMarkdownStyle: keeping existing bubbletea style")
 		return
 	}

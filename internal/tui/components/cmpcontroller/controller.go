@@ -3,6 +3,8 @@
 package cmpcontroller
 
 import (
+	"strings"
+
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
@@ -10,10 +12,12 @@ import (
 	"charm.land/log/v2"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/fuzzyselect"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/inputbox"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 )
@@ -52,6 +56,9 @@ type EnterOptions struct {
 	EnterFetch                       FetchPolicy
 	ConfirmDiscardOnCancel           bool
 	HideAutocompleteWhenContextEmpty bool
+	// Detachable makes esc detach from the editor, keeping what's been
+	// typed, rather than cancel. ctrl+c still cancels.
+	Detachable bool
 }
 
 type Submit struct {
@@ -75,6 +82,8 @@ type Controller struct {
 	confirmDiscard    bool
 	showConfirmCancel bool
 	hideOnEmpty       bool
+	detachable        bool
+	detached          bool
 }
 
 func New(ctx *context.ProgramContext, opts inputbox.ModelOpts) Controller {
@@ -168,6 +177,56 @@ func (c *Controller) Exit() {
 	c.confirmDiscard = false
 	c.showConfirmCancel = false
 	c.hideOnEmpty = false
+	c.detachable = false
+	c.detached = false
+	c.inputBox.SetDetachable(false)
+}
+
+// Detach leaves the editor while keeping what's been typed, so keys go back
+// to navigating. Attach returns to it.
+func (c *Controller) Detach() {
+	c.detached = true
+	c.inputBox.Blur()
+	c.fzfSelect.Hide()
+}
+
+// Attach returns to a detached editor.
+func (c *Controller) Attach() tea.Cmd {
+	c.detached = false
+	c.inputBox.CursorEnd()
+	return tea.Batch(textarea.Blink, c.inputBox.Focus())
+}
+
+// maxDetachedLines is how much of a detached draft is shown, to leave more
+// room for reading.
+const maxDetachedLines = 3
+
+// DetachedView renders a detached draft compactly: a title with key hints and
+// the start of the draft.
+func (c *Controller) DetachedView(hint string) string {
+	faint := lipgloss.NewStyle().Foreground(c.ctx.Theme.FaintText)
+	width := c.inputBox.Width()
+
+	lines := strings.Split(strings.TrimRight(c.Value(), "\n"), "\n")
+	truncated := len(lines) > maxDetachedLines
+	if truncated {
+		lines = lines[:maxDetachedLines]
+	}
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, width, constants.Ellipsis)
+	}
+	if truncated {
+		lines = append(lines, constants.Ellipsis)
+	}
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(c.ctx.Theme.SecondaryText).Render("Draft") +
+		faint.Render(" · "+hint)
+	return lipgloss.JoinVertical(lipgloss.Left, title, faint.Render(strings.Join(lines, "\n")))
+}
+
+// Detached reports whether the editor has content but was left to navigate.
+func (c *Controller) Detached() bool {
+	return c.Active() && c.detached
 }
 
 func (c *Controller) SetAutocompleteSource(src fuzzyselect.Source) {
@@ -185,8 +244,11 @@ func (c *Controller) Enter(opts EnterOptions) tea.Cmd {
 	c.confirmDiscard = opts.ConfirmDiscardOnCancel
 	c.showConfirmCancel = false
 	c.hideOnEmpty = opts.HideAutocompleteWhenContextEmpty
+	c.detachable = opts.Detachable
+	c.detached = false
 
 	c.inputBox.SetPrompt(opts.Prompt)
+	c.inputBox.SetDetachable(opts.Detachable)
 
 	cmds := []tea.Cmd{
 		textarea.Blink,
@@ -205,7 +267,7 @@ func (c *Controller) Update(msg tea.Msg) (tea.Cmd, bool) {
 
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
-		if c.Active() {
+		if c.Active() && !c.detached {
 			c.inputBox, taCmd = c.inputBox.Update(msg)
 			cmds = append(cmds, taCmd)
 			return tea.Batch(cmds...), true
@@ -213,7 +275,7 @@ func (c *Controller) Update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, false
 
 	case tea.KeyMsg:
-		if !c.Active() {
+		if !c.Active() || c.detached {
 			return nil, false
 		}
 
@@ -221,6 +283,11 @@ func (c *Controller) Update(msg tea.Msg) (tea.Cmd, bool) {
 		case key.Matches(msg, keys.CmpKeys.RefreshSuggestionsKey):
 			c.clearRelevantCache()
 			return c.loadSuggestions(true), true
+		}
+
+		if c.detachable && msg.String() == "esc" && !c.showConfirmCancel {
+			c.Detach()
+			return nil, true
 		}
 
 		switch msg.String() {

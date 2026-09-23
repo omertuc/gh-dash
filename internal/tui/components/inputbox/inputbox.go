@@ -26,12 +26,27 @@ type Model struct {
 	inputHelp help.Model
 	prompt    string
 	fzfSelect *fuzzyselect.Model
+	// detachable is whether esc detaches rather than cancels
+	detachable bool
 }
 
 var inputKeys = []key.Binding{
 	key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+d", "submit")),
 	key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("Ctrl+c/esc", "cancel")),
 	keys.CmpKeys.ToggleSuggestions,
+}
+
+var detachableInputKeys = []key.Binding{
+	key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+d", "submit")),
+	key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "detach")),
+	key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("Ctrl+c", "cancel")),
+	keys.CmpKeys.ToggleSuggestions,
+}
+
+// SetDetachable sets whether esc detaches from the input rather than
+// cancelling, for the help shown below it.
+func (m *Model) SetDetachable(detachable bool) {
+	m.detachable = detachable
 }
 
 const DefaultInputHeight = 5
@@ -161,11 +176,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		// Allow navigation/selection even if the popup is hidden (as long as there are filtered results)
 		if m.fzfSelect != nil &&
 			(m.fzfSelect.IsVisible() || m.fzfSelect.HasSuggestions()) {
+			// While the popup is hidden, the arrow keys move the cursor
+			isArrow := msg.String() == "up" || msg.String() == "down"
+			navigates := m.fzfSelect.IsVisible() || !isArrow
 			switch {
-			case key.Matches(msg, keys.CmpKeys.PrevKey):
+			case navigates && key.Matches(msg, keys.CmpKeys.PrevKey):
 				m.fzfSelect.Prev()
 				return m, nil
-			case key.Matches(msg, keys.CmpKeys.NextKey):
+			case navigates && key.Matches(msg, keys.CmpKeys.NextKey):
 				m.fzfSelect.Next()
 				return m, nil
 			case m.fzfSelect.Selected() != "" && key.Matches(msg, keys.CmpKeys.SelectKey):
@@ -234,11 +252,18 @@ func (m Model) View() string {
 			content,
 			lipgloss.NewStyle().
 				MarginTop(1).
-				Render(m.inputHelp.ShortHelpView(inputKeys)),
+				Render(m.inputHelp.ShortHelpView(m.helpKeys())),
 		)
 	}
 
 	return content
+}
+
+func (m Model) helpKeys() []key.Binding {
+	if m.detachable {
+		return detachableInputKeys
+	}
+	return inputKeys
 }
 
 func (m Model) ViewCompletions() string {
@@ -314,6 +339,8 @@ func (m *Model) Width() int {
 }
 
 func (m *Model) SetWidth(width int) {
+	// Keep the help from widening the input box beyond its width
+	m.inputHelp.SetWidth(width)
 	if m.textArea != nil {
 		m.textArea.SetWidth(width)
 		return

@@ -25,6 +25,10 @@ type Model struct {
 	// header is shown above the scrolling content and doesn't scroll with it
 	header string
 	body   string
+	// footer is shown below the scrolling content, e.g. an editor
+	footer string
+	// viewportContent is what was last put in the viewport
+	viewportContent string
 	// headerIsSticky is whether the viewport content was laid out with the
 	// header fixed above it (true) or scrolling along with it (false)
 	headerIsSticky bool
@@ -32,6 +36,13 @@ type Model struct {
 	contentHeight int
 
 	navKeysScroll bool
+
+	// anchors are the body lines where focusable items (comments) start
+	anchors []int
+	// focus is the index of the focused item, or -1 for none
+	focus int
+	// focusHint is shown on the focused item's title line
+	focusHint string
 }
 
 func NewModel() Model {
@@ -46,6 +57,7 @@ func NewModel() Model {
 		viewport:   vp,
 		ctx:        nil,
 		emptyState: "Nothing selected...",
+		focus:      -1,
 	}
 }
 
@@ -101,7 +113,11 @@ func (m Model) View() string {
 }
 
 func (m Model) renderContent() string {
-	parts := []string{m.viewport.View(), m.renderPager()}
+	parts := []string{m.highlightFocused(m.viewport.View())}
+	if m.footer != "" {
+		parts = append(parts, m.footer)
+	}
+	parts = append(parts, m.renderPager())
 	if m.headerIsSticky {
 		parts = append([]string{trimTrailingBlankLines(m.header), m.renderScrolledIndicator()}, parts...)
 	}
@@ -140,16 +156,25 @@ func trimTrailingBlankLines(s string) string {
 
 func (m Model) contentHeightForViewport() int {
 	if m.headerIsSticky {
-		return m.contentHeight - m.stickyHeaderHeight()
+		return m.availableHeight() - m.stickyHeaderHeight()
 	}
-	return m.contentHeight
+	return m.availableHeight()
+}
+
+// availableHeight is the height left for the header and content after the
+// footer.
+func (m Model) availableHeight() int {
+	if m.footer == "" {
+		return m.contentHeight
+	}
+	return m.contentHeight - lipgloss.Height(m.footer)
 }
 
 // stickyHeader reports whether the header is shown fixed above the content.
 // A header taking most of the space would leave too little room to scroll, so
 // then it scrolls along with the content instead.
 func (m Model) stickyHeader() bool {
-	return m.header != "" && m.stickyHeaderHeight() <= m.contentHeight/2
+	return m.header != "" && m.stickyHeaderHeight() <= m.availableHeight()/2
 }
 
 // renderPager renders the scroll percentage followed by hints for the keys
@@ -165,7 +190,11 @@ func (m Model) renderPager() string {
 	}
 	var hints []hint
 	if scrollable && m.navKeysScroll {
-		hints = append(hints, hint{pairHint(keys.Keys.Up, keys.Keys.Down, "scroll"), 1})
+		label := "scroll"
+		if len(m.anchors) > 0 {
+			label = "comment"
+		}
+		hints = append(hints, hint{pairHint(keys.Keys.Up, keys.Keys.Down, label), 1})
 	}
 	if scrollable {
 		hints = append(hints, hint{pairHint(keys.Keys.PageUp, keys.Keys.PageDown, "page"), 2})
@@ -220,13 +249,20 @@ func (m *Model) SetNavKeysScroll(navKeysScroll bool) {
 }
 
 func (m *Model) SetContent(data string) {
-	m.SetContentWithHeader("", data)
+	m.SetContentWithHeader("", data, "", nil)
 }
 
-// SetContentWithHeader sets content to scroll below a header that stays in
-// place.
-func (m *Model) SetContentWithHeader(header, data string) {
+// SetContentWithHeader sets content to scroll between a header and a footer
+// that stay in place, e.g. a PR's title and a comment being written. anchors
+// are the lines of data where focusable items (comments) start, which the
+// navigation keys move between.
+func (m *Model) SetContentWithHeader(header, data, footer string, anchors []int) {
+	if !slices.Equal(anchors, m.anchors) {
+		m.focus = -1
+	}
+	m.anchors = anchors
 	m.header = header
+	m.footer = footer
 	m.body = data
 	m.data = header + data
 	m.layout()
@@ -236,7 +272,7 @@ func (m *Model) SetContentWithHeader(header, data string) {
 // it or, when there's not enough room for that, scrolling along with it.
 func (m *Model) layout() {
 	m.headerIsSticky = m.stickyHeader()
-	height := m.contentHeight
+	height := m.availableHeight()
 	content := m.body
 	if m.headerIsSticky {
 		height -= m.stickyHeaderHeight()
@@ -244,7 +280,12 @@ func (m *Model) layout() {
 		content = lipgloss.JoinVertical(lipgloss.Left, m.header, m.body)
 	}
 	m.viewport.SetHeight(max(0, height))
-	m.viewport.SetContent(content)
+	// Setting content measures every line, and this runs on every keystroke
+	// while writing a comment, usually with the same content
+	if content != m.viewportContent {
+		m.viewportContent = content
+		m.viewport.SetContent(content)
+	}
 }
 
 func (m *Model) GetSidebarContentWidth() int {

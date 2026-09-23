@@ -18,6 +18,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"charm.land/log/v2"
 	"github.com/charmbracelet/fang"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	zone "github.com/lrstanley/bubblezone/v2"
 	"github.com/spf13/cobra"
@@ -258,7 +259,11 @@ func init() {
 		}
 
 		p := tea.NewProgram(&model)
-		if _, err := p.Run(); err != nil {
+		_, err = p.Run()
+		// The model enables color scheme change reports, which bubbletea
+		// doesn't know to turn off on exit.
+		fmt.Fprint(os.Stdout, ansi.ResetModeLightDark)
+		if err != nil {
 			fmt.Printf("%+v\n", err)
 			log.Fatal("fatal error during run", "err", err)
 		}

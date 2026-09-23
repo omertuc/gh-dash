@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"image/color"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -39,6 +41,7 @@ type Model struct {
 	width           int
 	carousel        carousel.Model
 	tabsHint        string
+	activityCache   *activityCache
 	editor          cmpcontroller.Controller
 	summaryViewMore bool
 }
@@ -55,10 +58,11 @@ func NewModel(ctx *context.ProgramContext) Model {
 	cmp := cmpcontroller.New(ctx, inputbox.ModelOpts{TextArea: &ta})
 
 	return Model{
-		ctx:      ctx,
-		pr:       nil,
-		carousel: c,
-		editor:   cmp,
+		ctx:           ctx,
+		pr:            nil,
+		carousel:      c,
+		editor:        cmp,
+		activityCache: &activityCache{},
 	}
 }
 
@@ -138,16 +142,27 @@ func (m Model) View() string {
 
 // ViewBody renders the selected tab's content, without the header.
 func (m Model) ViewBody() string {
+	body, _ := m.ViewBodyWithAnchors()
+	return body
+}
+
+// ViewBodyWithAnchors renders the selected tab's content along with where each
+// comment starts, when the tab shows comments.
+func (m Model) ViewBodyWithAnchors() (string, []common.CommentAnchor) {
 	if !m.hasData() {
-		return ""
+		return "", nil
+	}
+
+	if m.carousel.SelectedItem() == tabs[1] {
+		// Cached, since it re-renders on every keystroke while writing a
+		// comment in the editor docked below it
+		return m.cachedActivity()
 	}
 
 	body := strings.Builder{}
 	switch m.carousel.SelectedItem() {
 	case tabs[0]:
 		body.WriteString(m.viewOverviewTab())
-	case tabs[1]:
-		body.WriteString(m.renderActivity())
 	case tabs[2]:
 		body.WriteString(m.renderCommits())
 	case tabs[3]:
@@ -158,7 +173,126 @@ func (m Model) ViewBody() string {
 		body.WriteString(m.renderChangedFiles())
 	}
 
-	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(body.String())
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).
+		Render(body.String()), nil
+}
+
+// ViewEditor renders the editor, docked below the preview's content, or ""
+// when it isn't open. A detached draft is shown compactly with detachedHint.
+func (m Model) ViewEditor(detachedHint string) string {
+	if !m.editor.Active() {
+		return ""
+	}
+	editor := m.editor.View()
+	if m.editor.Detached() {
+		editor = m.editor.DetachedView(detachedHint)
+	}
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).
+		Render(m.ctx.Styles.Sidebar.InputBox.Render(editor))
+}
+
+// HasDetachedDraft reports whether there's a comment being written that was
+// detached from to read the preview.
+func (m *Model) HasDetachedDraft() bool {
+	return m.editor.Detached() && m.editor.Mode() == cmpcontroller.ModeComment
+}
+
+// AttachDraft returns to a detached draft.
+func (m *Model) AttachDraft() tea.Cmd {
+	return m.editor.Attach()
+}
+
+// DetachDraft leaves the comment being written, keeping it as a draft.
+func (m *Model) DetachDraft() {
+	if m.editor.Mode() == cmpcontroller.ModeComment {
+		m.editor.Detach()
+	}
+}
+
+// DraftValue returns the comment being written, if any.
+func (m *Model) DraftValue() string {
+	if m.editor.Mode() != cmpcontroller.ModeComment {
+		return ""
+	}
+	return m.editor.Value()
+}
+
+// AppendToDraft adds text to the end of the comment being written, on its own
+// paragraph.
+func (m *Model) AppendToDraft(text string) {
+	m.editor.SetValue(common.AppendParagraph(m.editor.Value(), text))
+}
+
+// DiscardEditor closes the editor, dropping anything written in it.
+func (m *Model) DiscardEditor() {
+	if m.editor.Active() {
+		m.editor.Exit()
+	}
+}
+
+type activityCacheKey struct {
+	data       *prrow.Data
+	isEnriched bool
+	width      int
+	// The first element of each list, which changes when a list is
+	// replaced, e.g. when the PR is fetched again
+	comments    any
+	numComments int
+	reviews     any
+	numReviews  int
+	threads     any
+	numThreads  int
+	styles      *context.Styles
+	// Adaptive colors and the markdown style depend on it
+	hasDarkBackground bool
+	minute            time.Time // so times like "3m ago" stay current
+}
+
+// activityCache holds the last rendered activity tab. It's a pointer so
+// View, which has a value receiver, can fill it.
+type activityCache struct {
+	key     activityCacheKey
+	view    string
+	anchors []common.CommentAnchor
+}
+
+// cachedActivity renders the activity tab with its padding, reusing the last
+// render when nothing it shows has changed. The tab re-renders on every
+// keystroke while typing a reply, and rendering many comments is slow.
+func (m Model) cachedActivity() (string, []common.CommentAnchor) {
+	if m.activityCache == nil {
+		view, anchors := m.renderActivityWithAnchors()
+		return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(view), anchors
+	}
+	enriched := m.pr.Data.Enriched
+	key := activityCacheKey{
+		data:        m.pr.Data,
+		isEnriched:  m.pr.Data.IsEnriched,
+		width:       m.width,
+		numComments: len(enriched.Comments.Nodes),
+		numReviews:  len(enriched.Reviews.Nodes),
+		numThreads:  len(enriched.ReviewThreads.Nodes),
+		styles:      &m.ctx.Styles,
+		minute:      time.Now().Truncate(time.Minute),
+
+		hasDarkBackground: m.ctx.HasDarkBackground,
+	}
+	if len(enriched.Comments.Nodes) > 0 {
+		key.comments = &enriched.Comments.Nodes[0]
+	}
+	if len(enriched.Reviews.Nodes) > 0 {
+		key.reviews = &enriched.Reviews.Nodes[0]
+	}
+	if len(enriched.ReviewThreads.Nodes) > 0 {
+		key.threads = &enriched.ReviewThreads.Nodes[0]
+	}
+	if m.activityCache.key == key && m.activityCache.view != "" {
+		return m.activityCache.view, slices.Clone(m.activityCache.anchors)
+	}
+	view, anchors := m.renderActivityWithAnchors()
+	view = lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(view)
+	*m.activityCache = activityCache{key: key, view: view, anchors: slices.Clone(anchors)}
+	return view, anchors
 }
 
 // ViewHeader renders the part of the preview above the selected tab's
@@ -228,10 +362,6 @@ func (m *Model) viewOverviewTab() string {
 	)
 	body.WriteString("\n")
 	body.WriteString(m.renderChecksOverview())
-
-	if m.editor.Mode() != cmpcontroller.ModeNone {
-		body.WriteString(m.ctx.Styles.Sidebar.InputBox.Render(m.editor.View()))
-	}
 
 	return body.String()
 }
@@ -624,7 +754,7 @@ func (m *Model) SetWidth(width int) {
 }
 
 func (m *Model) IsTextInputBoxFocused() bool {
-	return m.editor.Active()
+	return m.editor.Active() && !m.editor.Detached()
 }
 
 func (m *Model) UpdateProgramContext(ctx *context.ProgramContext) {
@@ -647,25 +777,33 @@ func (m *Model) GetIsCommenting() bool {
 }
 
 func (m *Model) SetIsCommenting(isCommenting bool) tea.Cmd {
-	if m.pr == nil {
-		return nil
-	}
-
 	if !isCommenting {
-		if m.editor.Mode() == cmpcontroller.ModeComment {
+		if m.pr != nil && m.editor.Mode() == cmpcontroller.ModeComment {
 			m.editor.Exit()
 		}
+		return nil
+	}
+	return m.StartComment("", false)
+}
+
+// StartComment opens the comment editor with text already in it, e.g. a
+// quoted comment to reply to. When detachable, esc leaves the editor keeping
+// the draft, rather than cancelling.
+func (m *Model) StartComment(text string, detachable bool) tea.Cmd {
+	if m.pr == nil {
 		return nil
 	}
 
 	m.editor.SetAutocompleteSource(&fuzzyselect.UserMentionSource{WithAtSymbol: true})
 	cmd := m.editor.Enter(cmpcontroller.EnterOptions{
+		InitialValue:                     text,
 		Mode:                             cmpcontroller.ModeComment,
 		Prompt:                           constants.CommentPrompt,
 		Repo:                             m.repoRef(),
 		EnterFetch:                       cmpcontroller.FetchSilent,
 		ConfirmDiscardOnCancel:           true,
 		HideAutocompleteWhenContextEmpty: true,
+		Detachable:                       detachable,
 	})
 	return cmd
 }

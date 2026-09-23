@@ -18,7 +18,7 @@ const benchCommentBody = "Thanks for the PR! A few notes:\n\n" +
 	"See [the docs](https://example.com/docs) for more details. > quoted text here"
 
 // BenchmarkActivityView measures rendering the activity tab of a PR with many
-// comments, which happens whenever the preview content changes.
+// comments, which happens whenever the comments change.
 func BenchmarkActivityView(b *testing.B) {
 	m := newTestModelWithWidth(b, &data.PullRequestData{Title: "bench"}, nil, nil, 80)
 	for i := range 30 {
@@ -29,7 +29,7 @@ func BenchmarkActivityView(b *testing.B) {
 	}
 	m.GoToActivityTab()
 	for b.Loop() {
-		_ = m.View()
+		_, _ = m.renderActivityWithAnchors()
 	}
 }
 
@@ -50,5 +50,52 @@ func TestTabsHintShownWhenItFits(t *testing.T) {
 	m.SetWidth(m.carousel.ItemsWidth() + 3)
 	if strings.Contains(ansi.Strip(m.ViewHeader()), "]→ [←") {
 		t.Fatal("hint should be dropped when it doesn't fit next to all tabs")
+	}
+}
+
+func TestActivityAnchorsPointAtCommentStarts(t *testing.T) {
+	m := newTestModelWithWidth(t, &data.PullRequestData{Title: "anchors"}, nil, nil, 80)
+	for i := range 3 {
+		m.pr.Data.Enriched.Comments.Nodes = append(m.pr.Data.Enriched.Comments.Nodes, data.Comment{
+			Body:      fmt.Sprintf("%s (%d)", benchCommentBody, i),
+			UpdatedAt: time.Now().Add(time.Duration(i) * time.Minute),
+		})
+	}
+	m.GoToActivityTab()
+
+	body, anchors := m.ViewBodyWithAnchors()
+	if len(anchors) != 3 {
+		t.Fatalf("got %d anchors, want 3", len(anchors))
+	}
+	lines := strings.Split(ansi.Strip(body), "\n")
+	for i, anchor := range anchors {
+		// Each comment starts with the top border of its author box
+		if !strings.HasPrefix(strings.TrimSpace(lines[anchor.Line]), "╭") {
+			t.Errorf("anchor %d at line %d doesn't start a comment: %q", i, anchor.Line, lines[anchor.Line])
+		}
+	}
+
+	m.GoToFirstTab()
+	if _, anchors := m.ViewBodyWithAnchors(); anchors != nil {
+		t.Errorf("overview tab should have no anchors, got %v", anchors)
+	}
+}
+
+func TestActivityCacheRefreshesWhenCommentsChange(t *testing.T) {
+	m := newTestModelWithWidth(t, &data.PullRequestData{Title: "cache"}, nil, nil, 80)
+	m.pr.Data.Enriched.Comments.Nodes = []data.Comment{{Body: "original comment", UpdatedAt: time.Now()}}
+	m.GoToActivityTab()
+
+	first, _ := m.ViewBodyWithAnchors()
+	again, _ := m.ViewBodyWithAnchors()
+	if first != again {
+		t.Fatal("rendering unchanged comments twice should give the same result")
+	}
+
+	// A fetch replaces the comments list
+	m.pr.Data.Enriched.Comments.Nodes = []data.Comment{{Body: "a new comment", UpdatedAt: time.Now()}}
+	updated, _ := m.ViewBodyWithAnchors()
+	if !strings.Contains(ansi.Strip(updated), "a new comment") {
+		t.Fatal("the activity tab should show the new comments")
 	}
 }

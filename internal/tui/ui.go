@@ -18,6 +18,8 @@ import (
 	"charm.land/lipgloss/v2/compat"
 	log "charm.land/log/v2"
 	"github.com/atotto/clipboard"
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/cli/go-gh/v2/pkg/browser"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	zone "github.com/lrstanley/bubblezone/v2"
@@ -69,6 +71,16 @@ type Model struct {
 	tasks            map[string]context.Task
 	positionOverride string // "" means no override, "right" or "bottom"
 	mode             Mode
+
+	// sidebarComments are the comments shown in the sidebar, in the order
+	// the sidebar's anchors are in
+	sidebarComments []common.CommentAnchor
+
+	// drafts are unsent comments kept for notifications that were left
+	// while writing them, by notification id
+	drafts map[string]string
+	// confirmingDraftDiscard is whether discarding a draft awaits a y/n
+	confirmingDraftDiscard bool
 }
 
 type Mode int
@@ -184,7 +196,15 @@ func (m *Model) initScreen() tea.Msg {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestBackgroundColor, m.initScreen)
+	return tea.Batch(
+		tea.RequestBackgroundColor,
+		// Ask the terminal to notify us when its color scheme changes, so
+		// we can switch between light and dark styles live.
+		tea.Raw(ansi.SetModeLightDark),
+		// Check whether the terminal supports that; if not, we poll instead.
+		tea.Raw(ansi.RequestModeLightDark),
+		m.initScreen,
+	)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -241,6 +261,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Confirm discarding a detached comment draft
+		if m.confirmingDraftDiscard {
+			m.confirmingDraftDiscard = false
+			if msg.String() == "y" || msg.String() == "Y" {
+				m.discardDraft()
+			} else {
+				m.syncSidebar()
+			}
+			return m, nil
+		}
+
 		// While the help is open, q and esc close it instead of quitting or
 		// going back. Ctrl+c still quits.
 		if m.footer.ShowAll && msg.String() != "ctrl+c" &&
@@ -269,6 +300,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.SectionMode):
 			m.mode = ModeSection
+
+		// With a comment focused in an open notification, reply to it
+		case key.Matches(msg, keys.NotificationKeys.ReplyToComment) && m.hasFocusedComment():
+			return m, m.replyToFocusedComment()
+
+		case key.Matches(msg, keys.NotificationKeys.ContinueDraft) && m.hasDetachedDraft():
+			return m, m.continueDraft()
+
+		case key.Matches(msg, keys.NotificationKeys.DiscardDraft) && m.hasDetachedDraft():
+			m.confirmingDraftDiscard = true
+			m.syncSidebar()
+			return m, nil
 
 		// With a notification's PR open, h/l switch its tabs rather than moving
 		// to another section, which would close it
@@ -302,15 +345,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.isNotificationSubjectShown() && (key.Matches(msg, m.keys.Down) ||
 			key.Matches(msg, m.keys.Up) || key.Matches(msg, m.keys.FirstLine) ||
 			key.Matches(msg, m.keys.LastLine)):
+			// Move between comments where there are any, else scroll by lines
 			switch {
 			case key.Matches(msg, m.keys.Down):
-				m.sidebar.ScrollDown(previewScrollLines)
+				if !m.sidebar.FocusNext() {
+					m.sidebar.ScrollDown(previewScrollLines)
+				}
 			case key.Matches(msg, m.keys.Up):
-				m.sidebar.ScrollUp(previewScrollLines)
+				if !m.sidebar.FocusPrev() {
+					m.sidebar.ScrollUp(previewScrollLines)
+				}
 			case key.Matches(msg, m.keys.FirstLine):
 				m.sidebar.ScrollToTop()
+				m.sidebar.ResetFocus()
 			case key.Matches(msg, m.keys.LastLine):
 				m.sidebar.ScrollToBottom()
+				m.sidebar.FocusLast()
 			}
 
 		case key.Matches(msg, m.keys.Down):
@@ -485,7 +535,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.openSidebarForPRInput(m.prView.SetIsLabeling)
 
 			case key.Matches(msg, keys.PRKeys.Comment):
-				return m, m.openSidebarForPRInput(m.prView.SetIsCommenting)
+				return m, m.openSidebarForPRComment()
 
 			case key.Matches(msg, keys.PRKeys.Close):
 				if currRowData != nil {
@@ -546,7 +596,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.openSidebarForInput(m.issueSidebar.SetIsUnassigning)
 
 			case key.Matches(msg, keys.IssueKeys.Comment):
-				return m, m.openSidebarForInput(m.issueSidebar.SetIsCommenting)
+				return m, m.openSidebarForIssueComment()
 
 			case key.Matches(msg, keys.IssueKeys.Checkout):
 				cmd, err := m.issueSidebar.Checkout()
@@ -611,7 +661,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, m.openSidebarForPRInput(m.prView.SetIsLabeling)
 
 						case prview.PRActionComment:
-							return m, m.openSidebarForPRInput(m.prView.SetIsCommenting)
+							return m, m.openSidebarForPRComment()
 
 						case prview.PRActionDiff:
 							if pr := m.notificationView.GetSubjectPR(); pr != nil {
@@ -688,7 +738,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, m.openSidebarForInput(m.issueSidebar.SetIsUnassigning)
 
 					case issueview.IssueActionComment:
-						return m, m.openSidebarForInput(m.issueSidebar.SetIsCommenting)
+						return m, m.openSidebarForIssueComment()
 
 					case issueview.IssueActionCheckout:
 						cmd, err := m.issueSidebar.Checkout()
@@ -832,17 +882,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prView.SetRow(m.notificationView.GetSubjectPR())
 			m.prView.SetWidth(width)
 			m.prView.SetEnrichedPR(msg.PR)
+			m.restoreDraft(msg.NotificationId, true)
 			// Switch to Activity tab and scroll to bottom if there's a latest comment
 			// (indicates there's new activity to show)
 			if msg.LatestCommentUrl != "" {
 				m.prView.GoToActivityTab()
-				m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
+				m.setSidebarPRContent()
 				m.sidebar.ScrollToBottom()
 			} else {
 				// For notifications without comments (new PRs, state changes, etc.)
 				// show the Overview tab without scrolling
 				m.prView.GoToFirstTab()
-				m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
+				m.setSidebarPRContent()
 			}
 			m.markNotificationAsRead(msg.NotificationId)
 		} else {
@@ -858,7 +909,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.issueSidebar.SetSectionId(0)
 			m.issueSidebar.SetRow(m.notificationView.GetSubjectIssue())
 			m.issueSidebar.SetWidth(width)
-			m.sidebar.SetContentWithHeader(m.issueSidebar.ViewHeader(), m.issueSidebar.ViewBody())
+			m.restoreDraft(msg.NotificationId, false)
+			m.setSidebarIssueContent()
 			// Scroll to bottom if there's a latest comment (indicates new activity)
 			if msg.LatestCommentUrl != "" {
 				m.sidebar.ScrollToBottom()
@@ -905,6 +957,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if currSection != nil {
 			cmds = append(cmds, currSection.FetchNextPageSectionRows()...)
 		}
+		// The color scheme may have changed while we weren't looking
+		cmds = append(cmds, tea.RequestBackgroundColor)
 
 	case tea.MouseClickMsg:
 		if msg.Button != tea.MouseLeft {
@@ -930,16 +984,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.onWindowSizeChanged(msg)
 
+	case tea.ModeReportMsg:
+		log.Debug("Mode report", "mode", msg.Mode, "value", msg.Value)
+		if msg.Mode == ansi.ModeLightDark && msg.Value.IsNotRecognized() {
+			log.Debug("Terminal doesn't report color scheme changes, polling background color")
+			cmds = append(cmds, pollBackgroundColor())
+		}
+
+	case pollBackgroundColorMsg:
+		cmds = append(cmds, tea.RequestBackgroundColor, pollBackgroundColor())
+
+	case uv.DarkColorSchemeEvent, uv.LightColorSchemeEvent:
+		// The terminal's color scheme changed; re-query the actual background
+		// color and let the BackgroundColorMsg handler restyle everything.
+		cmds = append(cmds, tea.RequestBackgroundColor)
+
 	case tea.BackgroundColorMsg:
-		log.Debugf("Setting markdownStyle in BackgroundColorMsg")
+		if m.ctx.BackgroundSource == "bubbletea" &&
+			m.ctx.HasDarkBackground == msg.IsDark() {
+			// Most likely a poll that found nothing changed
+			break
+		}
+		log.Debugf("Setting markdownStyle in BackgroundColorMsg %s", msg.String())
 		m.ctx.HasDarkBackground = msg.IsDark()
 		m.ctx.BackgroundSource = "bubbletea"
+		// Adaptive colors read this global at render time.
+		compat.HasDarkBackground = m.ctx.HasDarkBackground
 		log.Debugf(
 			"HasDarkBackground: %t, BackgroundSource: %s",
 			m.ctx.HasDarkBackground,
 			m.ctx.BackgroundSource,
 		)
 		markdown.InitializeMarkdownStyle(m.ctx)
+		if m.ctx.Config != nil {
+			// Some styles are rendered to strings up front, e.g. glyphs
+			m.ctx.Styles = context.InitStyles(m.ctx.Theme)
+			m.rebuildAllSectionRows()
+			cmds = append(cmds, m.syncSidebar())
+		}
 
 	case updateFooterMsg:
 		cmds = append(cmds, cmd, m.doUpdateFooterAtInterval())
@@ -1017,6 +1099,11 @@ func (m *Model) View() tea.View {
 	}
 	s.WriteString("\n")
 	m.sidebar.SetNavKeysScroll(m.isNotificationSubjectShown())
+	if m.isNotificationSubjectShown() {
+		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ReplyToComment) + " reply")
+	} else {
+		m.sidebar.SetFocusHint("")
+	}
 	var content string
 	currSection := m.getCurrSection()
 	if currSection != nil {
@@ -1160,6 +1247,7 @@ func (m *Model) onViewedRowChanged() tea.Cmd {
 	sidebarCmd := m.syncSidebar()
 	enrichCmd := m.prView.EnrichCurrRow()
 	m.sidebar.ScrollToTop()
+	m.stashDraft()
 	m.notificationView.ResetSubject()
 	keys.SetNotificationSubject(keys.NotificationSubjectNone)
 	return tea.Batch(sidebarCmd, enrichCmd)
@@ -1318,12 +1406,38 @@ func (m *Model) openSidebarForPRInput(setFunc func(bool) tea.Cmd) tea.Cmd {
 	return m.openSidebarForInput(setFunc)
 }
 
+// openSidebarForPRComment opens the comment editor below the PR's activity,
+// scrolled to the latest comments, or continues a detached draft.
+func (m *Model) openSidebarForPRComment() tea.Cmd {
+	if m.hasDetachedDraft() {
+		return m.continueDraft()
+	}
+	m.prView.GoToActivityTab()
+	cmd := m.openSidebarForInput(func(bool) tea.Cmd {
+		return m.prView.StartComment("", m.isNotificationSubjectShown())
+	})
+	m.sidebar.ScrollToBottom()
+	return cmd
+}
+
+// openSidebarForIssueComment opens the comment editor below the issue's
+// comments, or continues a detached draft.
+func (m *Model) openSidebarForIssueComment() tea.Cmd {
+	if m.hasDetachedDraft() {
+		return m.continueDraft()
+	}
+	cmd := m.openSidebarForInput(func(bool) tea.Cmd {
+		return m.issueSidebar.StartComment("", m.isNotificationSubjectShown())
+	})
+	m.sidebar.ScrollToBottom()
+	return cmd
+}
+
 func (m *Model) openSidebarForInput(setFunc func(bool) tea.Cmd) tea.Cmd {
 	m.sidebar.IsOpen = true
 	cmd := setFunc(true)
 	m.syncMainContentDimensions()
 	m.syncSidebar()
-	m.sidebar.ScrollToBottom()
 	return cmd
 }
 
@@ -1343,6 +1457,7 @@ func (m *Model) backToNotification() tea.Cmd {
 		return nil
 	}
 
+	m.stashDraft()
 	m.notificationView.ClearSubject()
 	keys.SetNotificationSubject(keys.NotificationSubjectNone)
 	m.sidebar.ScrollToTop()
@@ -1355,6 +1470,158 @@ func (m *Model) promptConfirmation(currSection section.Section, action string) t
 		return currSection.SetIsPromptConfirmationShown(true)
 	}
 	return nil
+}
+
+func (m *Model) setSidebarPRContent() {
+	body, comments := m.prView.ViewBodyWithAnchors()
+	m.setSidebarContentWithComments(m.prView.ViewHeader(), body,
+		m.prView.ViewEditor(m.draftHint()), comments)
+}
+
+func (m *Model) setSidebarIssueContent() {
+	body, comments := m.issueSidebar.ViewBodyWithAnchors()
+	m.setSidebarContentWithComments(m.issueSidebar.ViewHeader(), body,
+		m.issueSidebar.ViewEditor(m.draftHint()), comments)
+}
+
+func (m *Model) setSidebarContentWithComments(
+	header, body, editor string,
+	comments []common.CommentAnchor,
+) {
+	m.sidebarComments = comments
+	lines := make([]int, 0, len(comments))
+	for _, c := range comments {
+		lines = append(lines, c.Line)
+	}
+	m.sidebar.SetContentWithHeader(header, body, editor, lines)
+}
+
+// draftHint is shown on a detached comment draft.
+func (m *Model) draftHint() string {
+	if m.confirmingDraftDiscard {
+		return "discard it? y/n"
+	}
+	return keys.HintKeys(keys.NotificationKeys.ContinueDraft) + " continue · " +
+		keys.HintKeys(keys.NotificationKeys.DiscardDraft) + " discard"
+}
+
+// hasDetachedDraft reports whether an open notification has a comment draft
+// that was detached from to read the preview.
+func (m *Model) hasDetachedDraft() bool {
+	if !m.isNotificationSubjectShown() {
+		return false
+	}
+	if m.notificationView.GetSubjectPR() != nil {
+		return m.prView.HasDetachedDraft()
+	}
+	return m.issueSidebar.HasDetachedDraft()
+}
+
+func (m *Model) continueDraft() tea.Cmd {
+	var cmd tea.Cmd
+	if m.notificationView.GetSubjectPR() != nil {
+		cmd = m.prView.AttachDraft()
+	} else {
+		cmd = m.issueSidebar.AttachDraft()
+	}
+	m.syncSidebar()
+	return cmd
+}
+
+func (m *Model) discardDraft() {
+	if m.notificationView.GetSubjectPR() != nil {
+		m.prView.DiscardEditor()
+	} else {
+		m.issueSidebar.DiscardEditor()
+	}
+	m.syncSidebar()
+}
+
+// stashDraft keeps the open notification's unsent comment, if any, so it can
+// be restored when the notification is opened again, and closes the editor.
+func (m *Model) stashDraft() {
+	id := m.notificationView.GetSubjectId()
+	if id == "" {
+		return
+	}
+	var draft string
+	if m.notificationView.GetSubjectPR() != nil {
+		draft = m.prView.DraftValue()
+		m.prView.DiscardEditor()
+	} else if m.notificationView.GetSubjectIssue() != nil {
+		draft = m.issueSidebar.DraftValue()
+		m.issueSidebar.DiscardEditor()
+	}
+	m.confirmingDraftDiscard = false
+	if strings.TrimSpace(draft) == "" {
+		return
+	}
+	if m.drafts == nil {
+		m.drafts = map[string]string{}
+	}
+	m.drafts[id] = draft
+	m.updateNotificationSections(notificationssection.UpdateNotificationDraftMsg{Id: id, HasDraft: true})
+}
+
+// restoreDraft brings back a notification's stashed comment, detached so it's
+// docked below the preview until continued.
+func (m *Model) restoreDraft(notificationId string, isPR bool) {
+	draft, ok := m.drafts[notificationId]
+	if !ok {
+		return
+	}
+	delete(m.drafts, notificationId)
+	if isPR {
+		m.prView.StartComment(draft, true)
+		m.prView.DetachDraft()
+	} else {
+		m.issueSidebar.StartComment(draft, true)
+		m.issueSidebar.DetachDraft()
+	}
+	m.updateNotificationSections(
+		notificationssection.UpdateNotificationDraftMsg{Id: notificationId, HasDraft: false})
+}
+
+// focusedComment returns the comment focused in an open notification's
+// preview, if any.
+func (m *Model) focusedComment() (common.CommentAnchor, bool) {
+	if !m.isNotificationSubjectShown() {
+		return common.CommentAnchor{}, false
+	}
+	i := m.sidebar.FocusedAnchor()
+	if i < 0 || i >= len(m.sidebarComments) {
+		return common.CommentAnchor{}, false
+	}
+	return m.sidebarComments[i], true
+}
+
+func (m *Model) hasFocusedComment() bool {
+	_, ok := m.focusedComment()
+	return ok
+}
+
+// replyToFocusedComment opens the comment editor with the focused comment
+// quoted, like GitHub's "Quote reply".
+func (m *Model) replyToFocusedComment() tea.Cmd {
+	comment, ok := m.focusedComment()
+	if !ok {
+		return nil
+	}
+	quote := common.QuoteReply(comment.Body)
+	if m.hasDetachedDraft() {
+		// Quote it in the draft being written, like GitHub's quote reply
+		if m.notificationView.GetSubjectPR() != nil {
+			m.prView.AppendToDraft(quote)
+		} else {
+			m.issueSidebar.AppendToDraft(quote)
+		}
+		return m.continueDraft()
+	}
+	// Stay on the current tab so the comment being replied to stays in view
+	if m.notificationView.GetSubjectPR() != nil {
+		return m.openSidebarForInput(func(bool) tea.Cmd { return m.prView.StartComment(quote, true) })
+	}
+	return m.openSidebarForInput(func(bool) tea.Cmd { return m.issueSidebar.StartComment(quote, true) })
 }
 
 func (m *Model) syncSidebar() tea.Cmd {
@@ -1379,20 +1646,12 @@ func (m *Model) syncSidebar() tea.Cmd {
 		m.prView.SetSectionId(m.currSectionId)
 		m.prView.SetRow(row)
 		m.prView.SetWidth(width)
-		m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
-		// Scroll to bottom if in input mode to keep inputbox visible
-		if m.prView.IsTextInputBoxFocused() {
-			m.sidebar.ScrollToBottom()
-		}
+		m.setSidebarPRContent()
 	case *data.IssueData:
 		m.issueSidebar.SetSectionId(m.currSectionId)
 		m.issueSidebar.SetRow(row)
 		m.issueSidebar.SetWidth(width)
-		m.sidebar.SetContentWithHeader(m.issueSidebar.ViewHeader(), m.issueSidebar.ViewBody())
-		// Scroll to bottom if in input mode to keep inputbox visible
-		if m.issueSidebar.IsTextInputBoxFocused() {
-			m.sidebar.ScrollToBottom()
-		}
+		m.setSidebarIssueContent()
 	case *notificationrow.Data:
 		notifId := row.GetId()
 
@@ -1403,26 +1662,19 @@ func (m *Model) syncSidebar() tea.Cmd {
 				m.prView.SetSectionId(0)
 				m.prView.SetRow(m.notificationView.GetSubjectPR())
 				m.prView.SetWidth(width)
-				m.sidebar.SetContentWithHeader(m.prView.ViewHeader(), m.prView.ViewBody())
-				// Scroll to bottom if in input mode to keep inputbox visible
-				if m.prView.IsTextInputBoxFocused() {
-					m.sidebar.ScrollToBottom()
-				}
+				m.setSidebarPRContent()
 			} else if m.notificationView.GetSubjectIssue() != nil {
 				m.issueSidebar.SetSectionId(0)
 				m.issueSidebar.SetRow(m.notificationView.GetSubjectIssue())
 				m.issueSidebar.SetWidth(width)
-				m.sidebar.SetContentWithHeader(m.issueSidebar.ViewHeader(), m.issueSidebar.ViewBody())
-				// Scroll to bottom if in input mode to keep inputbox visible
-				if m.issueSidebar.IsTextInputBoxFocused() {
-					m.sidebar.ScrollToBottom()
-				}
+				m.setSidebarIssueContent()
 			}
 			return nil
 		}
 
 		// Clear cached subject when navigating to a different notification
 		// so key dispatch doesn't route keys to the wrong subject's handler.
+		m.stashDraft()
 		m.notificationView.ClearSubject()
 		keys.SetNotificationSubject(keys.NotificationSubjectNone)
 		// Show prompt to view notification (don't auto-fetch)
@@ -1652,6 +1904,20 @@ func (m *Model) getCurrentViewSections() []section.Section {
 	}
 }
 
+// rebuildAllSectionRows re-renders every section's rows, e.g. when colors
+// change, since rows are rendered to styled strings when their data arrives.
+func (m *Model) rebuildAllSectionRows() {
+	sections := slices.Concat(m.prs, m.issues, m.notifications)
+	if m.repo != nil {
+		sections = append(sections, m.repo)
+	}
+	for _, s := range sections {
+		if s != nil {
+			s.SetRows(s.BuildRows())
+		}
+	}
+}
+
 func (m *Model) updateTabs() {
 	sections := m.getCurrentViewSections()
 	m.tabs.SetSections(sections)
@@ -1663,6 +1929,7 @@ func (m *Model) switchSelectedView() tea.Cmd {
 	// Reset notification subject when leaving notifications view
 	if m.ctx.View == config.NotificationsView {
 		keys.SetNotificationSubject(keys.NotificationSubjectNone)
+		m.stashDraft()
 		m.notificationView.ClearSubject()
 	}
 
@@ -1861,6 +2128,18 @@ func (m *Model) doRefreshAtInterval() tea.Cmd {
 }
 
 type updateFooterMsg struct{}
+
+type pollBackgroundColorMsg struct{}
+
+// backgroundPollInterval is how often we re-query the background color in
+// terminals that can't notify us when their color scheme changes.
+const backgroundPollInterval = time.Second
+
+func pollBackgroundColor() tea.Cmd {
+	return tea.Tick(backgroundPollInterval, func(time.Time) tea.Msg {
+		return pollBackgroundColorMsg{}
+	})
+}
 
 func (m *Model) doUpdateFooterAtInterval() tea.Cmd {
 	return tea.Tick(

@@ -62,7 +62,7 @@ var DefaultTheme = &Theme{
 		Dark:  lipgloss.ANSIColor(251),
 	},
 	FaintText: compat.AdaptiveColor{
-		Light: lipgloss.ANSIColor(7),
+		Light: lipgloss.ANSIColor(245),
 		Dark:  lipgloss.ANSIColor(245),
 	},
 	InvertedText: compat.AdaptiveColor{
@@ -70,11 +70,11 @@ var DefaultTheme = &Theme{
 		Dark:  lipgloss.ANSIColor(236),
 	},
 	SuccessText: compat.AdaptiveColor{
-		Light: lipgloss.ANSIColor(10),
+		Light: lipgloss.ANSIColor(2),
 		Dark:  lipgloss.ANSIColor(10),
 	},
 	WarningText: compat.AdaptiveColor{
-		Light: lipgloss.ANSIColor(11),
+		Light: lipgloss.Color("#E36209"),
 		Dark:  lipgloss.ANSIColor(11),
 	},
 	ErrorText: compat.AdaptiveColor{

@@ -148,6 +148,12 @@ func (m Model) ViewHeader() string {
 // ViewBody renders the rest of the preview below the header: labels, the
 // issue's description and its comments.
 func (m Model) ViewBody() string {
+	body, _ := m.ViewBodyWithAnchors()
+	return body
+}
+
+// ViewBodyWithAnchors renders the body along with where each comment starts.
+func (m Model) ViewBodyWithAnchors() (string, []common.CommentAnchor) {
 	s := strings.Builder{}
 
 	labels := m.renderLabels()
@@ -158,13 +164,67 @@ func (m Model) ViewBody() string {
 
 	s.WriteString(m.renderBody())
 	s.WriteString("\n\n")
-	s.WriteString(m.renderActivity())
-
-	if m.editor.Mode() != cmpcontroller.ModeNone {
-		s.WriteString(m.ctx.Styles.Sidebar.InputBox.Render(m.editor.View()))
+	activityStart := strings.Count(s.String(), "\n")
+	activity, anchors := m.renderActivityWithAnchors()
+	s.WriteString(activity)
+	for i := range anchors {
+		anchors[i].Line += activityStart
 	}
 
-	return m.contentStyle().Render(s.String())
+	return m.contentStyle().Render(s.String()), anchors
+}
+
+// ViewEditor renders the editor, docked below the preview's content, or ""
+// when it isn't open. A detached draft is shown compactly with detachedHint.
+func (m Model) ViewEditor(detachedHint string) string {
+	if !m.editor.Active() {
+		return ""
+	}
+	editor := m.editor.View()
+	if m.editor.Detached() {
+		editor = m.editor.DetachedView(detachedHint)
+	}
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).
+		Render(m.ctx.Styles.Sidebar.InputBox.Render(editor))
+}
+
+// HasDetachedDraft reports whether there's a comment being written that was
+// detached from to read the preview.
+func (m *Model) HasDetachedDraft() bool {
+	return m.editor.Detached() && m.editor.Mode() == cmpcontroller.ModeComment
+}
+
+// AttachDraft returns to a detached draft.
+func (m *Model) AttachDraft() tea.Cmd {
+	return m.editor.Attach()
+}
+
+// DetachDraft leaves the comment being written, keeping it as a draft.
+func (m *Model) DetachDraft() {
+	if m.editor.Mode() == cmpcontroller.ModeComment {
+		m.editor.Detach()
+	}
+}
+
+// DraftValue returns the comment being written, if any.
+func (m *Model) DraftValue() string {
+	if m.editor.Mode() != cmpcontroller.ModeComment {
+		return ""
+	}
+	return m.editor.Value()
+}
+
+// AppendToDraft adds text to the end of the comment being written, on its own
+// paragraph.
+func (m *Model) AppendToDraft(text string) {
+	m.editor.SetValue(common.AppendParagraph(m.editor.Value(), text))
+}
+
+// DiscardEditor closes the editor, dropping anything written in it.
+func (m *Model) DiscardEditor() {
+	if m.editor.Active() {
+		m.editor.Exit()
+	}
 }
 
 func (m Model) contentStyle() lipgloss.Style {
@@ -292,7 +352,7 @@ func (m *Model) SetRow(data *data.IssueData) {
 }
 
 func (m *Model) IsTextInputBoxFocused() bool {
-	return m.editor.Active()
+	return m.editor.Active() && !m.editor.Detached()
 }
 
 func (m *Model) UpdateProgramContext(ctx *context.ProgramContext) {
@@ -309,25 +369,33 @@ func (m *Model) GetIsCommenting() bool {
 }
 
 func (m *Model) SetIsCommenting(isCommenting bool) tea.Cmd {
-	if m.issue == nil {
-		return nil
-	}
-
 	if !isCommenting {
-		if m.editor.Mode() == cmpcontroller.ModeComment {
+		if m.issue != nil && m.editor.Mode() == cmpcontroller.ModeComment {
 			m.editor.Exit()
 		}
+		return nil
+	}
+	return m.StartComment("", false)
+}
+
+// StartComment opens the comment editor with text already in it, e.g. a
+// quoted comment to reply to. When detachable, esc leaves the editor keeping
+// the draft, rather than cancelling.
+func (m *Model) StartComment(text string, detachable bool) tea.Cmd {
+	if m.issue == nil {
 		return nil
 	}
 
 	m.editor.SetAutocompleteSource(&fuzzyselect.UserMentionSource{WithAtSymbol: true})
 	cmd := m.editor.Enter(cmpcontroller.EnterOptions{
+		InitialValue:                     text,
 		Mode:                             cmpcontroller.ModeComment,
 		Prompt:                           constants.CommentPrompt,
 		Repo:                             m.repoRef(),
 		EnterFetch:                       cmpcontroller.FetchSilent,
 		ConfirmDiscardOnCancel:           true,
 		HideAutocompleteWhenContextEmpty: true,
+		Detachable:                       detachable,
 	})
 	return cmd
 }

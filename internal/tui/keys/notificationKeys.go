@@ -22,6 +22,9 @@ type NotificationKeyMap struct {
 	SortByRepo           key.Binding
 	SwitchToPRs          key.Binding
 	ToggleSmartFiltering key.Binding
+	ReplyToComment       key.Binding
+	ContinueDraft        key.Binding
+	DiscardDraft         key.Binding
 }
 
 var NotificationKeys = NotificationKeyMap{
@@ -73,6 +76,20 @@ var NotificationKeys = NotificationKeyMap{
 		key.WithKeys("t"),
 		key.WithHelp("t", "toggle smart filtering"),
 	),
+	// Only while a comment is focused in an open notification
+	ReplyToComment: key.NewBinding(
+		key.WithKeys("r"),
+		key.WithHelp("r", "reply to comment"),
+	),
+	// Only while a comment draft is detached from in an open notification
+	ContinueDraft: key.NewBinding(
+		key.WithKeys("i"),
+		key.WithHelp("i", "continue draft"),
+	),
+	DiscardDraft: key.NewBinding(
+		key.WithKeys("ctrl+x"),
+		key.WithHelp("ctrl+x", "discard draft"),
+	),
 }
 
 func NotificationFullHelp() []key.Binding {
@@ -89,6 +106,9 @@ func NotificationFullHelp() []key.Binding {
 		NotificationKeys.SortByRepo,
 		NotificationKeys.SwitchToPRs,
 		NotificationKeys.ToggleSmartFiltering,
+		NotificationKeys.ReplyToComment,
+		NotificationKeys.ContinueDraft,
+		NotificationKeys.DiscardDraft,
 	}
 }
 
@@ -141,6 +161,12 @@ func rebindNotificationKeys(keys []config.Keybinding) error {
 			key = &NotificationKeys.SwitchToPRs
 		case "toggleSmartFiltering":
 			key = &NotificationKeys.ToggleSmartFiltering
+		case "replyToComment":
+			key = &NotificationKeys.ReplyToComment
+		case "continueDraft":
+			key = &NotificationKeys.ContinueDraft
+		case "discardDraft":
+			key = &NotificationKeys.DiscardDraft
 		default:
 			return fmt.Errorf("unknown built-in notification key: '%s'", notifKey.Builtin)
 		}

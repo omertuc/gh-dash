@@ -372,6 +372,15 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 			}
 		}
 
+	case UpdateNotificationDraftMsg:
+		for i := range m.Notifications {
+			if m.Notifications[i].GetId() == msg.Id {
+				m.Notifications[i].HasDraft = msg.HasDraft
+				m.syncRow(i)
+				break
+			}
+		}
+
 	case UpdateNotificationUrlMsg:
 		// Update the notification with async-resolved URL (e.g., for CheckSuite)
 		log.Debug("UpdateNotificationUrlMsg received", "id", msg.Id, "url", msg.ResolvedUrl)
@@ -883,6 +892,13 @@ type UpdateNotificationCommentsMsg struct {
 	SubjectState     string // OPEN, CLOSED, MERGED
 	IsDraft          bool
 	Actor            string // Username who triggered the notification
+}
+
+// UpdateNotificationDraftMsg marks whether a notification has an unsent
+// comment draft.
+type UpdateNotificationDraftMsg struct {
+	Id       string
+	HasDraft bool
 }
 
 // UpdateNotificationUrlMsg carries a resolved URL for notifications where the URL

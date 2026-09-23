@@ -146,6 +146,10 @@ func (t *TestSection) ResetPageInfo() {
 }
 
 // ResetRows implements section.Section.
+// SetRows implements section.Section.
+func (t *TestSection) SetRows(rows []table.Row) {
+}
+
 func (t *TestSection) ResetRows() {
 	panic("unimplemented")
 }

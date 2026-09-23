@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/markdown"
 	"github.com/dlvhdr/gh-dash/v4/internal/utils"
@@ -16,9 +17,18 @@ import (
 type RenderedActivity struct {
 	UpdatedAt      time.Time
 	RenderedString string
+	Author         string
+	Body           string
 }
 
 func (m *Model) renderActivity() string {
+	activity, _ := m.renderActivityWithAnchors()
+	return activity
+}
+
+// renderActivityWithAnchors renders the activity tab along with where each
+// comment or review starts.
+func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 	width := m.getIndentedContentWidth()
 	markdownRenderer := markdown.GetMarkdownRenderer(width, m.ctx)
 	bodyStyle := lipgloss.NewStyle()
@@ -27,7 +37,7 @@ func (m *Model) renderActivity() string {
 	var comments []comment
 
 	if !m.pr.Data.IsEnriched {
-		return bodyStyle.Render("Loading...")
+		return bodyStyle.Render("Loading..."), nil
 	}
 
 	for _, review := range m.pr.Data.Enriched.ReviewThreads.Nodes {
@@ -60,6 +70,8 @@ func (m *Model) renderActivity() string {
 		activities = append(activities, RenderedActivity{
 			UpdatedAt:      comment.UpdatedAt,
 			RenderedString: renderedComment,
+			Author:         comment.Author,
+			Body:           comment.Body,
 		})
 	}
 
@@ -71,6 +83,8 @@ func (m *Model) renderActivity() string {
 		activities = append(activities, RenderedActivity{
 			UpdatedAt:      review.UpdatedAt,
 			RenderedString: renderedReview,
+			Author:         review.Author.Login,
+			Body:           review.Body,
 		})
 	}
 
@@ -79,20 +93,28 @@ func (m *Model) renderActivity() string {
 	})
 
 	body := ""
+	var anchors []common.CommentAnchor
 	if len(activities) == 0 {
 		body = renderEmptyState()
 	} else {
+		title := m.ctx.Styles.Common.MainTextStyle.MarginBottom(1).Underline(true).Render(
+			fmt.Sprintf("%s  %d comments", constants.CommentsIcon, len(activities)))
+		line := lipgloss.Height(title)
 		var renderedActivities []string
 		for _, activity := range activities {
 			renderedActivities = append(renderedActivities, activity.RenderedString)
+			anchors = append(anchors, common.CommentAnchor{
+				Line:   line,
+				Author: activity.Author,
+				Body:   activity.Body,
+			})
+			line += lipgloss.Height(activity.RenderedString)
 		}
-		title := m.ctx.Styles.Common.MainTextStyle.MarginBottom(1).Underline(true).Render(
-			fmt.Sprintf("%s  %d comments", constants.CommentsIcon, len(activities)))
 		body = lipgloss.JoinVertical(lipgloss.Left, renderedActivities...)
 		body = lipgloss.JoinVertical(lipgloss.Left, title, body)
 	}
 
-	return bodyStyle.Render(body)
+	return bodyStyle.Render(body), anchors
 }
 
 func renderEmptyState() string {

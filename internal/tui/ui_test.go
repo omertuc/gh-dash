@@ -13,6 +13,7 @@ import (
 
 	// "charm.land/x/exp/teatest"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	zone "github.com/lrstanley/bubblezone/v2"
@@ -2381,4 +2382,153 @@ func TestNotificationView_SectionKeysSwitchOpenPRTabs(t *testing.T) {
 	m.Update(tea.KeyPressMsg{Text: "h"})
 	require.Equal(t, initialTab, m.prView.SelectedTab(), "h should move back to the previous tab")
 	require.NotNil(t, m.notificationView.GetSubjectPR(), "h should not close the notification")
+}
+
+func TestNotificationView_ReplyToFocusedCommentQuotesIt(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	require.NoError(t, err)
+
+	ctx := &context.ProgramContext{
+		Config:              &cfg,
+		View:                config.NotificationsView,
+		MainContentHeight:   40,
+		DynamicPreviewWidth: 64,
+		ScreenWidth:         140,
+		ScreenHeight:        50,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	sidebarModel := sidebar.NewModel()
+	sidebarModel.IsOpen = true
+	sidebarModel.UpdateProgramContext(ctx)
+
+	m := Model{
+		ctx:              ctx,
+		keys:             keys.Keys,
+		prView:           prview.NewModel(ctx),
+		sidebar:          sidebarModel,
+		issueSidebar:     issueview.NewModel(ctx),
+		notificationView: notificationview.NewModel(ctx),
+		footer:           footer.NewModel(ctx),
+	}
+
+	// The notification list, with the notification being viewed selected
+	notifications := notificationssection.NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	notifications.Notifications = []notificationrow.Data{
+		{Notification: data.NotificationData{Id: "test-notification-id"}},
+	}
+	notifications.Table.SetRows(notifications.BuildRows())
+	m.notifications = []section.Section{&notifications}
+
+	prData := data.PullRequestData{Title: "A PR", Url: "https://github.com/o/r/pull/1"}
+	enriched := data.EnrichedPullRequestData{}
+	for i, body := range []string{"first comment", "second comment\n\nwith two paragraphs"} {
+		c := data.Comment{Body: body, UpdatedAt: time.Now().Add(time.Duration(i) * time.Minute)}
+		c.Author.Login = "alice"
+		enriched.Comments.Nodes = append(enriched.Comments.Nodes, c)
+	}
+	pr := &prrow.Data{Primary: &prData, Enriched: enriched, IsEnriched: true}
+	m.notificationView.SetSubjectPR(pr, "test-notification-id")
+	m.prView.SetRow(pr)
+	m.prView.SetWidth(60)
+	m.prView.GoToActivityTab()
+	m.setSidebarPRContent()
+
+	// Without a focused comment, r isn't a reply (it refreshes instead)
+	require.False(t, m.hasFocusedComment(), "no comment should be focused yet")
+
+	m.Update(tea.KeyPressMsg{Text: "j"})
+	m.Update(tea.KeyPressMsg{Text: "j"})
+	activityTab := m.prView.SelectedTab()
+	m.Update(tea.KeyPressMsg{Text: "r"})
+	require.True(t, m.prView.IsTextInputBoxFocused(), "r should open the comment editor")
+	require.Equal(t, activityTab, m.prView.SelectedTab(), "replying should stay on the activity tab")
+	editor := ansi.Strip(m.prView.ViewEditor(""))
+	require.Contains(t, editor, "> second comment", "the reply should quote the focused comment")
+	require.NotContains(t, editor, "> first comment", "only the focused comment should be quoted")
+
+	// Esc detaches, keeping the draft docked and the notification open
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.False(t, m.prView.IsTextInputBoxFocused(), "esc should detach from the editor")
+	require.True(t, m.prView.HasDetachedDraft(), "the draft should be kept")
+	require.NotNil(t, m.notificationView.GetSubjectPR(), "esc should not close the notification")
+	require.Contains(t, ansi.Strip(m.sidebar.View()), "Draft", "the draft should stay docked")
+
+	// Navigating doesn't type into the draft, and r adds another quote to it
+	draft := m.prView.DraftValue()
+	m.Update(tea.KeyPressMsg{Text: "k"})
+	require.Equal(t, draft, m.prView.DraftValue(), "k should navigate, not type")
+	m.Update(tea.KeyPressMsg{Text: "r"})
+	require.True(t, m.prView.IsTextInputBoxFocused(), "r should continue the draft")
+	require.Contains(t, m.prView.DraftValue(), "> second comment", "the first quote should be kept")
+	require.Contains(t, m.prView.DraftValue(), "> first comment", "the new quote should be added")
+
+	// Leaving the notification keeps the draft for when it's opened again
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Nil(t, m.notificationView.GetSubjectPR(), "esc again should go back from the notification")
+	require.Contains(t, m.drafts, "test-notification-id", "the draft should be stashed")
+
+	m.Update(notificationPRFetchedMsg{NotificationId: "test-notification-id", PR: enriched})
+	require.True(t, m.prView.HasDetachedDraft(), "reopening should restore the draft, detached")
+	require.Contains(t, m.prView.DraftValue(), "> first comment")
+	require.NotContains(t, m.drafts, "test-notification-id")
+
+	// Discarding asks first
+	m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	require.Contains(t, ansi.Strip(m.sidebar.View()), "discard it? y/n")
+	m.Update(tea.KeyPressMsg{Text: "n"})
+	require.True(t, m.prView.HasDetachedDraft(), "n should keep the draft")
+	m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	m.Update(tea.KeyPressMsg{Text: "y"})
+	require.False(t, m.prView.HasDetachedDraft(), "y should discard the draft")
+	require.Empty(t, m.prView.DraftValue())
+}
+
+func TestNotificationView_CommentOpensEditorBelowActivity(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	require.NoError(t, err)
+
+	ctx := &context.ProgramContext{
+		Config:            &cfg,
+		View:              config.NotificationsView,
+		MainContentHeight: 40,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	sidebarModel := sidebar.NewModel()
+	sidebarModel.IsOpen = true
+	sidebarModel.UpdateProgramContext(ctx)
+
+	m := Model{
+		ctx:              ctx,
+		keys:             keys.Keys,
+		prView:           prview.NewModel(ctx),
+		sidebar:          sidebarModel,
+		issueSidebar:     issueview.NewModel(ctx),
+		notificationView: notificationview.NewModel(ctx),
+	}
+	prData := data.PullRequestData{Title: "A PR", Url: "https://github.com/o/r/pull/1"}
+	pr := &prrow.Data{Primary: &prData, IsEnriched: true}
+	m.notificationView.SetSubjectPR(pr, "test-notification-id")
+	m.prView.SetRow(pr)
+	m.prView.SetWidth(60)
+	m.prView.GoToFirstTab()
+	overviewTab := m.prView.SelectedTab()
+
+	activity := prview.NewModel(ctx)
+	activity.GoToActivityTab()
+
+	m.Update(tea.KeyPressMsg{Text: "c"})
+	require.True(t, m.prView.IsTextInputBoxFocused(), "c should open the comment editor")
+	require.NotEqual(t, overviewTab, m.prView.SelectedTab(), "c should leave the overview tab")
+	require.Equal(t, activity.SelectedTab(), m.prView.SelectedTab(), "c should move to the activity tab")
 }
