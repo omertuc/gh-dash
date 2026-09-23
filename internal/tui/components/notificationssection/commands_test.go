@@ -110,7 +110,8 @@ func TestCheckoutPRErrorMessage(t *testing.T) {
 		t.Fatal("CheckoutPR() expected error, got nil")
 	}
 
-	expectedMsg := "local path to repo not specified, set one in your config.yml under repoPaths"
+	expectedMsg := "no local clone of owner/repo known: add it under repoPaths in your config.yml " +
+		"or run gh-dash from inside it"
 	if err.Error() != expectedMsg {
 		t.Errorf("CheckoutPR() error = %q, want %q", err.Error(), expectedMsg)
 	}

@@ -1,12 +1,8 @@
 package notificationssection
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -269,11 +265,9 @@ func (m *Model) openInBrowser() tea.Cmd {
 // CheckoutPR checks out a PR. This is a standalone function that can be called
 // from ui.go with the PR details from the notification view.
 func CheckoutPR(ctx *context.ProgramContext, prNumber int, repoName string) (tea.Cmd, error) {
-	repoPath, ok := common.GetRepoLocalPath(repoName, ctx.Config.RepoPaths)
-	if !ok {
-		return nil, errors.New(
-			"local path to repo not specified, set one in your config.yml under repoPaths",
-		)
+	repoPath, err := ctx.RepoLocalPath(repoName)
+	if err != nil {
+		return nil, err
 	}
 
 	taskId := fmt.Sprintf("checkout_%d", prNumber)
@@ -286,19 +280,7 @@ func CheckoutPR(ctx *context.ProgramContext, prNumber int, repoName string) (tea
 	}
 	startCmd := ctx.StartTask(task)
 	return tea.Batch(startCmd, func() tea.Msg {
-		c := exec.Command(
-			"gh",
-			"pr",
-			"checkout",
-			fmt.Sprint(prNumber),
-		)
-		userHomeDir, _ := os.UserHomeDir()
-		if strings.HasPrefix(repoPath, "~") {
-			repoPath = strings.Replace(repoPath, "~", userHomeDir, 1)
-		}
-
-		c.Dir = repoPath
-		err := c.Run()
+		err := common.RunCmdInDir(repoPath, "gh", "pr", "checkout", fmt.Sprint(prNumber))
 		return constants.TaskFinishedMsg{TaskId: taskId, Err: err}
 	}), nil
 }

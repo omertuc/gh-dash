@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,8 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/section"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/sidebar"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/tabs"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/tasks"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/theme"
@@ -2445,14 +2448,14 @@ func TestNotificationView_ReplyToFocusedCommentQuotesIt(t *testing.T) {
 	m.prView.GoToActivityTab()
 	m.setSidebarPRContent()
 
-	// Without a focused comment, r isn't a reply (it refreshes instead)
+	// Without a focused comment, > isn't a reply
 	require.False(t, m.hasFocusedComment(), "no comment should be focused yet")
 
 	m.Update(tea.KeyPressMsg{Text: "j"})
 	m.Update(tea.KeyPressMsg{Text: "j"})
 	activityTab := m.prView.SelectedTab()
-	m.Update(tea.KeyPressMsg{Text: "r"})
-	require.True(t, m.prView.IsTextInputBoxFocused(), "r should open the comment editor")
+	m.Update(tea.KeyPressMsg{Text: ">"})
+	require.True(t, m.prView.IsTextInputBoxFocused(), "> should open the comment editor")
 	require.Equal(t, activityTab, m.prView.SelectedTab(), "replying should stay on the activity tab")
 	editor := ansi.Strip(m.prView.ViewEditor(""))
 	require.Contains(t, editor, "> second comment", "the reply should quote the focused comment")
@@ -2465,12 +2468,12 @@ func TestNotificationView_ReplyToFocusedCommentQuotesIt(t *testing.T) {
 	require.NotNil(t, m.notificationView.GetSubjectPR(), "esc should not close the notification")
 	require.Contains(t, ansi.Strip(m.sidebar.View()), "Draft", "the draft should stay docked")
 
-	// Navigating doesn't type into the draft, and r adds another quote to it
+	// Navigating doesn't type into the draft, and > adds another quote to it
 	draft := m.prView.DraftValue()
 	m.Update(tea.KeyPressMsg{Text: "k"})
 	require.Equal(t, draft, m.prView.DraftValue(), "k should navigate, not type")
-	m.Update(tea.KeyPressMsg{Text: "r"})
-	require.True(t, m.prView.IsTextInputBoxFocused(), "r should continue the draft")
+	m.Update(tea.KeyPressMsg{Text: ">"})
+	require.True(t, m.prView.IsTextInputBoxFocused(), "> should continue the draft")
 	require.Contains(t, m.prView.DraftValue(), "> second comment", "the first quote should be kept")
 	require.Contains(t, m.prView.DraftValue(), "> first comment", "the new quote should be added")
 
@@ -2494,6 +2497,91 @@ func TestNotificationView_ReplyToFocusedCommentQuotesIt(t *testing.T) {
 	m.Update(tea.KeyPressMsg{Text: "y"})
 	require.False(t, m.prView.HasDetachedDraft(), "y should discard the draft")
 	require.Empty(t, m.prView.DraftValue())
+}
+
+func TestNotificationView_PostedCommentShowsOnlyOnceSubmitted(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	require.NoError(t, err)
+
+	ctx := &context.ProgramContext{
+		Config:              &cfg,
+		View:                config.NotificationsView,
+		MainContentHeight:   40,
+		DynamicPreviewWidth: 64,
+		ScreenWidth:         140,
+		ScreenHeight:        50,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	sidebarModel := sidebar.NewModel()
+	sidebarModel.IsOpen = true
+	sidebarModel.UpdateProgramContext(ctx)
+
+	m := Model{
+		ctx:              ctx,
+		keys:             keys.Keys,
+		prView:           prview.NewModel(ctx),
+		sidebar:          sidebarModel,
+		issueSidebar:     issueview.NewModel(ctx),
+		notificationView: notificationview.NewModel(ctx),
+		footer:           footer.NewModel(ctx),
+		tasks:            map[string]context.Task{},
+	}
+	ctx.StartTask = func(task context.Task) tea.Cmd {
+		m.tasks[task.Id] = task
+		return nil
+	}
+
+	notifications := notificationssection.NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	notifications.Notifications = []notificationrow.Data{
+		{Notification: data.NotificationData{Id: "test-notification-id"}},
+	}
+	notifications.Table.SetRows(notifications.BuildRows())
+	m.notifications = []section.Section{&notifications}
+
+	prData := data.PullRequestData{Number: 7, Title: "A PR", Url: "https://github.com/o/r/pull/7"}
+	pr := &prrow.Data{Primary: &prData, IsEnriched: true}
+	m.notificationView.SetSubjectPR(pr, "test-notification-id")
+	m.prView.SetRow(pr)
+	m.prView.SetWidth(60)
+	m.prView.GoToActivityTab()
+	m.setSidebarPRContent()
+
+	finish := func(taskId string, err error, body string) {
+		m.tasks[taskId] = context.Task{Id: taskId}
+		update := tasks.UpdatePRMsg{PrNumber: 7}
+		if err == nil {
+			update.NewComment = &data.Comment{Body: body, UpdatedAt: time.Now()}
+		}
+		m.Update(constants.TaskFinishedMsg{TaskId: taskId, Err: err, Msg: update})
+	}
+
+	finish("failed", errors.New("boom"), "")
+	require.Empty(t, m.notificationView.GetSubjectPR().Enriched.Comments.Nodes,
+		"a comment that failed to post shouldn't be shown")
+
+	finish("posted", nil, "my new comment")
+	require.Contains(t, ansi.Strip(m.sidebar.View()), "my new comment",
+		"the posted comment should be shown in the open notification")
+
+	// r refreshes the open PR rather than the notifications
+	m.Update(tea.KeyPressMsg{Text: "r"})
+	require.Contains(t, m.tasks, "notification_refresh_test-notification-id")
+	require.NotNil(t, m.notificationView.GetSubjectPR(), "refreshing shouldn't close the notification")
+
+	refreshed := data.EnrichedPullRequestData{Number: 7, Url: prData.Url, Title: "A PR"}
+	c := data.Comment{Body: "someone else's comment", UpdatedAt: time.Now()}
+	refreshed.Comments.Nodes = append(refreshed.Comments.Nodes, c)
+	m.Update(constants.TaskFinishedMsg{
+		TaskId: "notification_refresh_test-notification-id",
+		Msg:    notificationSubjectRefreshedMsg{NotificationId: "test-notification-id", PR: &refreshed},
+	})
+	require.Contains(t, ansi.Strip(m.sidebar.View()), "someone else's comment",
+		"the refetched comments should be shown")
 }
 
 func TestNotificationView_CommentOpensEditorBelowActivity(t *testing.T) {

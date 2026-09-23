@@ -8,6 +8,7 @@ import (
 	gitm "github.com/aymanbagabas/git-module"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	"github.com/dlvhdr/gh-dash/v4/internal/config"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/theme"
 	"github.com/dlvhdr/gh-dash/v4/internal/utils"
 )
@@ -54,6 +55,20 @@ type ProgramContext struct {
 	StartTask            func(task Task) tea.Cmd
 	Theme                theme.Theme
 	Styles               Styles
+}
+
+// RepoLocalPath returns the local clone of repoName, from the repoPaths
+// config or, failing that, the repo gh-dash was started from.
+func (ctx *ProgramContext) RepoLocalPath(repoName string) (string, error) {
+	var currentRepoName string
+	if ctx.HasGHRepo() {
+		currentRepoName = ctx.GHRepo.Owner + "/" + ctx.GHRepo.Name
+	}
+	var cfgPaths map[string]string
+	if ctx.Config != nil {
+		cfgPaths = ctx.Config.RepoPaths
+	}
+	return common.ResolveRepoLocalPath(repoName, cfgPaths, currentRepoName, ctx.RepoPath)
 }
 
 func (ctx *ProgramContext) HasGHRepo() bool {

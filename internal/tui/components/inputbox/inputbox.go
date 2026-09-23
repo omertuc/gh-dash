@@ -13,6 +13,7 @@ import (
 	"charm.land/log/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/fuzzyselect"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 )
@@ -57,6 +58,11 @@ func DefaultTextArea(ctx *context.ProgramContext) textarea.Model {
 	ta.Prompt = ""
 	ta.SetHeight(DefaultInputHeight)
 	ta.CharLimit = 65536
+	// Match textinput, which also binds the ctrl variants
+	ta.KeyMap.WordForward.SetKeys("alt+right", "ctrl+right", "alt+f")
+	ta.KeyMap.WordBackward.SetKeys("alt+left", "ctrl+left", "alt+b")
+	ta.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+backspace", "ctrl+w")
+	ta.KeyMap.DeleteWordForward.SetKeys("alt+delete", "ctrl+delete", "alt+d")
 	base := lipgloss.NewStyle()
 	ta.SetStyles(textarea.Styles{
 		Focused: textarea.StyleState{
@@ -158,7 +164,22 @@ func (m Model) AutocompleteItemsToExclude() []string {
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case editorFinishedMsg:
+		value, err := readEditorResult(msg)
+		if err != nil {
+			return m, func() tea.Msg { return constants.ErrMsg{Err: err} }
+		}
+		m.SetValue(value)
+		if m.fzfSelect != nil {
+			m.fzfSelect.Hide()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.textArea != nil && key.Matches(msg, openEditorKey) {
+			return m, openInEditor(m.Value())
+		}
+
 		// Allow toggling suggestions at any time
 		if m.fzfSelect != nil && key.Matches(msg, keys.CmpKeys.ToggleSuggestions) {
 			if m.fzfSelect.IsVisible() {
@@ -260,10 +281,14 @@ func (m Model) View() string {
 }
 
 func (m Model) helpKeys() []key.Binding {
+	helpKeys := inputKeys
 	if m.detachable {
-		return detachableInputKeys
+		helpKeys = detachableInputKeys
 	}
-	return inputKeys
+	if m.textArea != nil {
+		helpKeys = append(helpKeys[:len(helpKeys):len(helpKeys)], openEditorKey)
+	}
+	return helpKeys
 }
 
 func (m Model) ViewCompletions() string {

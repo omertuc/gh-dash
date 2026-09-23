@@ -330,6 +330,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sidebar.ClearSearch()
 			return m, nil
 
+		// With a notification's PR/Issue open, refresh it rather than the
+		// notifications, e.g. to see new comments
+		case key.Matches(msg, m.keys.Refresh) && m.isNotificationSubjectShown():
+			return m, m.refreshNotificationSubject()
+
 		// With a comment focused in an open notification, reply to it
 		case key.Matches(msg, keys.NotificationKeys.ReplyToComment) && m.hasFocusedComment():
 			return m, m.replyToFocusedComment()
@@ -717,8 +722,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 						case prview.PRActionCheckout:
 							if pr := m.notificationView.GetSubjectPR(); pr != nil {
-								cmd, _ = notificationssection.CheckoutPR(
+								var err error
+								cmd, err = notificationssection.CheckoutPR(
 									m.ctx, pr.GetNumber(), pr.GetRepoNameWithOwner())
+								if err != nil {
+									m.ctx.Error = err
+								}
 							}
 							return m, cmd
 
@@ -903,6 +912,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			scmd := m.updateSection(msg.SectionId, msg.SectionType, msg.Msg)
 			cmds = append(cmds, scmd)
+			m.updateNotificationSubject(msg.Msg)
 
 			syncCmd := m.syncSidebar()
 			cmds = append(cmds, syncCmd)
@@ -1253,6 +1263,14 @@ type notificationPRFetchedMsg struct {
 	PR               data.EnrichedPullRequestData
 	LatestCommentUrl string
 	Err              error
+}
+
+// notificationSubjectRefreshedMsg carries a refetched PR or Issue of an open
+// notification
+type notificationSubjectRefreshedMsg struct {
+	NotificationId string
+	PR             *data.EnrichedPullRequestData
+	Issue          *data.IssueData
 }
 
 type notificationIssueFetchedMsg struct {
@@ -1937,6 +1955,80 @@ func (m *Model) replyToFocusedComment() tea.Cmd {
 		return m.openSidebarForInput(func(bool) tea.Cmd { return m.prView.StartComment(quote, true) })
 	}
 	return m.openSidebarForInput(func(bool) tea.Cmd { return m.issueSidebar.StartComment(quote, true) })
+}
+
+// refreshNotificationSubject refetches the open notification's PR/Issue,
+// keeping the tab, scroll position and any draft
+func (m *Model) refreshNotificationSubject() tea.Cmd {
+	notifId := m.notificationView.GetSubjectId()
+	pr, issue := m.notificationView.GetSubjectPR(), m.notificationView.GetSubjectIssue()
+	var url string
+	var number int
+	switch {
+	case pr != nil:
+		url, number = pr.Primary.Url, pr.Primary.Number
+	case issue != nil:
+		url, number = issue.Url, issue.Number
+	default:
+		return nil
+	}
+
+	taskId := fmt.Sprintf("notification_refresh_%s", notifId)
+	startCmd := m.ctx.StartTask(context.Task{
+		Id:           taskId,
+		StartText:    fmt.Sprintf("Refreshing #%d", number),
+		FinishedText: fmt.Sprintf("Refreshed #%d", number),
+		State:        context.TaskStart,
+	})
+	return tea.Batch(startCmd, func() tea.Msg {
+		refreshed := notificationSubjectRefreshedMsg{NotificationId: notifId}
+		var err error
+		if pr != nil {
+			var fetched data.EnrichedPullRequestData
+			fetched, err = data.FetchPullRequest(url)
+			refreshed.PR = &fetched
+		} else {
+			var fetched data.IssueData
+			fetched, err = data.FetchIssue(url)
+			refreshed.Issue = &fetched
+		}
+		if err != nil {
+			return constants.TaskFinishedMsg{TaskId: taskId, Err: err}
+		}
+		return constants.TaskFinishedMsg{TaskId: taskId, Msg: refreshed}
+	})
+}
+
+// updateNotificationSubject applies a finished task's update, e.g. a posted
+// comment, to the open notification's PR/Issue, which isn't part of any
+// section
+func (m *Model) updateNotificationSubject(msg tea.Msg) {
+	pr, issue := m.notificationView.GetSubjectPR(), m.notificationView.GetSubjectIssue()
+	switch msg := msg.(type) {
+	case tasks.UpdatePRMsg:
+		if pr != nil && pr.Primary.Number == msg.PrNumber && msg.NewComment != nil {
+			pr.Enriched.Comments.Nodes = append(pr.Enriched.Comments.Nodes, *msg.NewComment)
+		}
+	case tasks.UpdateIssueMsg:
+		if issue != nil && issue.Number == msg.IssueNumber && msg.NewComment != nil {
+			issue.Comments.Nodes = append(issue.Comments.Nodes, *msg.NewComment)
+		}
+	case notificationSubjectRefreshedMsg:
+		// It's stale if another notification has been opened since
+		if m.notificationView.GetSubjectId() != msg.NotificationId {
+			return
+		}
+		if msg.PR != nil && pr != nil {
+			prData := msg.PR.ToPullRequestData()
+			m.notificationView.SetSubjectPR(&prrow.Data{
+				Primary:    &prData,
+				Enriched:   *msg.PR,
+				IsEnriched: true,
+			}, msg.NotificationId)
+		} else if msg.Issue != nil && issue != nil {
+			m.notificationView.SetSubjectIssue(msg.Issue, msg.NotificationId)
+		}
+	}
 }
 
 func (m *Model) syncSidebar() tea.Cmd {

@@ -20,7 +20,7 @@ func (src *UserMentionSource) ExtractContext(input string, cursorPos tea.Positio
 	}
 
 	lines := strings.Split(input, "\n")
-	if cursorPos.Y > len(lines) {
+	if cursorPos.Y < 0 || cursorPos.Y >= len(lines) {
 		return Context{}
 	}
 
@@ -45,12 +45,10 @@ func (src *UserMentionSource) ExtractContext(input string, cursorPos tea.Positio
 		userStart = i
 	}
 	if src.WithAtSymbol {
-		userStart = userStart + 1
-	}
-
-	if userStart >= len(runes)+1 ||
-		(userStart > 0 && userStart < len(runes) && src.WithAtSymbol && runes[userStart-1] != '@') {
-		return Context{}
+		if userStart >= len(runes) || runes[userStart] != '@' {
+			return Context{}
+		}
+		userStart++
 	}
 
 	userEnd := len(runes)

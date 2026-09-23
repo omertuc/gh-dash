@@ -175,6 +175,10 @@ func CommentOnIssue(
 		StartText:    fmt.Sprintf("Commenting on issue #%d", issueNumber),
 		FinishedText: fmt.Sprintf("Commented on issue #%d", issueNumber),
 		Msg: func(c *exec.Cmd, err error) tea.Msg {
+			// Only show the comment once it's actually been posted
+			if err != nil {
+				return UpdateIssueMsg{IssueNumber: issueNumber}
+			}
 			return UpdateIssueMsg{
 				IssueNumber: issueNumber,
 				NewComment: &data.IssueComment{

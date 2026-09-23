@@ -82,8 +82,8 @@ var NotificationKeys = NotificationKeyMap{
 	),
 	// Only while a comment is focused in an open notification
 	ReplyToComment: key.NewBinding(
-		key.WithKeys("r"),
-		key.WithHelp("r", "reply to comment"),
+		key.WithKeys(">"),
+		key.WithHelp(">", "reply to comment"),
 	),
 	// Only while a commit is focused in an open notification's PR
 	ViewCommitFiles: key.NewBinding(

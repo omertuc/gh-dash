@@ -366,6 +366,10 @@ func CommentOnPR(
 		StartText:    fmt.Sprintf("Commenting on PR #%d", prNumber),
 		FinishedText: fmt.Sprintf("Commented on PR #%d", prNumber),
 		Msg: func(c *exec.Cmd, err error) tea.Msg {
+			// Only show the comment once it's actually been posted
+			if err != nil {
+				return UpdatePRMsg{PrNumber: prNumber}
+			}
 			return UpdatePRMsg{
 				PrNumber: prNumber,
 				NewComment: &data.Comment{

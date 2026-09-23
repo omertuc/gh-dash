@@ -228,6 +228,11 @@ func TestUserMentionSource(t *testing.T) {
 		source.ExtractContext("hello @octo"+string('\n'), tea.Position{Y: 1, X: 0}),
 	)
 
+	// Cursor right after a trailing word boundary
+	require.Equal(t, Context{}, source.ExtractContext("hello ", tea.Position{X: 6}))
+	require.Equal(t, Context{}, source.ExtractContext("hello. ", tea.Position{X: 6}))
+	require.Equal(t, Context{}, source.ExtractContext("a\nb", tea.Position{Y: 2}))
+
 	newInput, newCursor := source.InsertSuggestion(
 		"hello @oc",
 		"octo",
