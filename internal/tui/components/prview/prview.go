@@ -285,6 +285,8 @@ type activityCacheKey struct {
 	numReviews  int
 	threads     any
 	numThreads  int
+	events      any
+	numEvents   int
 	styles      *context.Styles
 	// Adaptive colors and the markdown style depend on it
 	hasDarkBackground bool
@@ -315,6 +317,7 @@ func (m Model) cachedActivity() (string, []common.CommentAnchor) {
 		numComments: len(enriched.Comments.Nodes),
 		numReviews:  len(enriched.Reviews.Nodes),
 		numThreads:  len(enriched.ReviewThreads.Nodes),
+		numEvents:   len(enriched.TimelineItems.Nodes),
 		styles:      &m.ctx.Styles,
 		minute:      time.Now().Truncate(time.Minute),
 
@@ -328,6 +331,9 @@ func (m Model) cachedActivity() (string, []common.CommentAnchor) {
 	}
 	if len(enriched.ReviewThreads.Nodes) > 0 {
 		key.threads = &enriched.ReviewThreads.Nodes[0]
+	}
+	if len(enriched.TimelineItems.Nodes) > 0 {
+		key.events = &enriched.TimelineItems.Nodes[0]
 	}
 	if m.activityCache.key == key && m.activityCache.view != "" {
 		return m.activityCache.view, slices.Clone(m.activityCache.anchors)

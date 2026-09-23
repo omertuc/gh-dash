@@ -61,7 +61,8 @@ type EnrichedPullRequestData struct {
 	ReviewRequests     ReviewRequests             `graphql:"reviewRequests(last: 100)"`
 	Reviews            Reviews                    `graphql:"reviews(last: 100)"`
 	SuggestedReviewers []SuggestedReviewer
-	Files              ChangedFiles `graphql:"files(first: 20)"`
+	Files              ChangedFiles  `graphql:"files(first: 20)"`
+	TimelineItems      TimelineItems `graphql:"timelineItems(last: 100, itemTypes: [PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT, BASE_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT, CROSS_REFERENCED_EVENT, REFERENCED_EVENT, LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT, REVIEW_DISMISSED_EVENT, RENAMED_TITLE_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, MERGED_EVENT, CLOSED_EVENT, REOPENED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, HEAD_REF_DELETED_EVENT, HEAD_REF_RESTORED_EVENT, AUTO_MERGE_ENABLED_EVENT, AUTO_MERGE_DISABLED_EVENT, ADDED_TO_MERGE_QUEUE_EVENT, REMOVED_FROM_MERGE_QUEUE_EVENT, LOCKED_EVENT, UNLOCKED_EVENT])"`
 }
 
 type PullRequestData struct {
@@ -267,6 +268,7 @@ type Comment struct {
 		Login string
 	}
 	Body      string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
@@ -275,6 +277,7 @@ type ReviewComment struct {
 		Login string
 	}
 	Body      string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 	StartLine int
 	Line      int
@@ -299,6 +302,7 @@ type Review struct {
 	}
 	Body      string
 	State     string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 

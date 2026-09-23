@@ -99,3 +99,69 @@ func TestActivityCacheRefreshesWhenCommentsChange(t *testing.T) {
 		t.Fatal("the activity tab should show the new comments")
 	}
 }
+
+func TestActivityShowsTimelineEventsBetweenComments(t *testing.T) {
+	m := newTestModelWithWidth(t, &data.PullRequestData{Title: "timeline"}, nil, nil, 100)
+	start := time.Now().Add(-time.Hour)
+	at := func(minutes int) time.Time { return start.Add(time.Duration(minutes) * time.Minute) }
+
+	enriched := &m.pr.Data.Enriched
+	enriched.HeadRefName = "my-branch"
+	enriched.Comments.Nodes = []data.Comment{
+		{Body: "first comment", CreatedAt: at(1), UpdatedAt: at(50)},
+		{Body: "second comment", CreatedAt: at(10), UpdatedAt: at(10)},
+	}
+	commit := func(minutes int, headline string) data.TimelineItem {
+		item := data.TimelineItem{Typename: "PullRequestCommit"}
+		item.PullRequestCommit.Commit.CommittedDate = at(minutes)
+		item.PullRequestCommit.Commit.MessageHeadline = headline
+		item.PullRequestCommit.Commit.Author.User.Login = "dev"
+		return item
+	}
+	forcePush := data.TimelineItem{Typename: "HeadRefForcePushedEvent"}
+	forcePush.HeadRefForcePushedEvent.CreatedAt = at(5)
+	forcePush.HeadRefForcePushedEvent.Actor.Login = "dev"
+	forcePush.HeadRefForcePushedEvent.BeforeCommit.AbbreviatedOid = "aaaaaaa"
+	forcePush.HeadRefForcePushedEvent.AfterCommit.AbbreviatedOid = "bbbbbbb"
+	crossRef := data.TimelineItem{Typename: "CrossReferencedEvent"}
+	crossRef.CrossReferencedEvent.CreatedAt = at(20)
+	crossRef.CrossReferencedEvent.Actor.Login = "other"
+	crossRef.CrossReferencedEvent.Source.Typename = "Issue"
+	crossRef.CrossReferencedEvent.Source.Issue.Number = 42
+	crossRef.CrossReferencedEvent.Source.Issue.Title = "Some bug"
+	enriched.TimelineItems.Nodes = []data.TimelineItem{
+		commit(2, "fix the thing"), commit(3, "fix it again"), forcePush, crossRef,
+	}
+	m.GoToActivityTab()
+
+	body, anchors := m.ViewBodyWithAnchors()
+	plain := ansi.Strip(body)
+	want := []string{
+		"first comment",
+		"dev added 2 commits",
+		"fix the thing",
+		"fix it again",
+		"dev force-pushed my-branch from aaaaaaa to bbbbbbb",
+		"second comment",
+		"other mentioned this in",
+		"#42 Some bug",
+	}
+	pos := 0
+	for _, w := range want {
+		i := strings.Index(plain[pos:], w)
+		if i < 0 {
+			t.Fatalf("expected %q after position %d in:\n%s", w, pos, plain)
+		}
+		pos += i + len(w)
+	}
+
+	if len(anchors) != 2 {
+		t.Fatalf("got %d anchors, want 2, events shouldn't be focusable", len(anchors))
+	}
+	lines := strings.Split(plain, "\n")
+	for i, anchor := range anchors {
+		if !strings.HasPrefix(strings.TrimSpace(lines[anchor.Line]), "╭") {
+			t.Errorf("anchor %d at line %d doesn't start a comment: %q", i, anchor.Line, lines[anchor.Line])
+		}
+	}
+}

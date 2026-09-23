@@ -375,6 +375,7 @@ func CommentOnPR(
 				NewComment: &data.Comment{
 					Author:    struct{ Login string }{Login: ctx.User},
 					Body:      body,
+					CreatedAt: time.Now(),
 					UpdatedAt: time.Now(),
 				},
 			}

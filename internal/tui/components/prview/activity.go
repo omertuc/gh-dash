@@ -15,10 +15,22 @@ import (
 )
 
 type RenderedActivity struct {
-	UpdatedAt      time.Time
+	CreatedAt      time.Time
 	RenderedString string
 	Author         string
 	Body           string
+	// Event is set for timeline events, e.g. commits and force pushes, which
+	// are rendered along with the events next to them
+	Event *data.TimelineItem
+}
+
+// activityTime is when a comment or review was posted. Comments added locally
+// after posting them only have an update time.
+func activityTime(createdAt, updatedAt time.Time) time.Time {
+	if createdAt.IsZero() {
+		return updatedAt
+	}
+	return createdAt
 }
 
 func (m *Model) renderActivity() string {
@@ -27,7 +39,8 @@ func (m *Model) renderActivity() string {
 }
 
 // renderActivityWithAnchors renders the activity tab along with where each
-// comment or review starts.
+// comment or review starts. Timeline events, e.g. pushed commits, show
+// between them in the order they happened.
 func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 	width := m.getIndentedContentWidth()
 	markdownRenderer := markdown.GetMarkdownRenderer(width, m.ctx)
@@ -47,6 +60,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 			comments = append(comments, comment{
 				Author:    c.Author.Login,
 				Body:      c.Body,
+				CreatedAt: activityTime(c.CreatedAt, c.UpdatedAt),
 				UpdatedAt: c.UpdatedAt,
 				Path:      &path,
 				Line:      &line,
@@ -58,6 +72,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 		comments = append(comments, comment{
 			Author:    c.Author.Login,
 			Body:      c.Body,
+			CreatedAt: activityTime(c.CreatedAt, c.UpdatedAt),
 			UpdatedAt: c.UpdatedAt,
 		})
 	}
@@ -68,7 +83,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 			continue
 		}
 		activities = append(activities, RenderedActivity{
-			UpdatedAt:      comment.UpdatedAt,
+			CreatedAt:      comment.CreatedAt,
 			RenderedString: renderedComment,
 			Author:         comment.Author,
 			Body:           comment.Body,
@@ -81,15 +96,21 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 			continue
 		}
 		activities = append(activities, RenderedActivity{
-			UpdatedAt:      review.UpdatedAt,
+			CreatedAt:      activityTime(review.CreatedAt, review.UpdatedAt),
 			RenderedString: renderedReview,
 			Author:         review.Author.Login,
 			Body:           review.Body,
 		})
 	}
+	numComments := len(activities)
 
-	sort.Slice(activities, func(i, j int) bool {
-		return activities[i].UpdatedAt.Before(activities[j].UpdatedAt)
+	for i := range m.pr.Data.Enriched.TimelineItems.Nodes {
+		item := &m.pr.Data.Enriched.TimelineItems.Nodes[i]
+		activities = append(activities, RenderedActivity{CreatedAt: item.Event().CreatedAt, Event: item})
+	}
+
+	sort.SliceStable(activities, func(i, j int) bool {
+		return activities[i].CreatedAt.Before(activities[j].CreatedAt)
 	})
 
 	body := ""
@@ -98,10 +119,23 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 		body = renderEmptyState()
 	} else {
 		title := m.ctx.Styles.Common.MainTextStyle.MarginBottom(1).Underline(true).Render(
-			fmt.Sprintf("%s  %d comments", constants.CommentsIcon, len(activities)))
+			fmt.Sprintf("%s  %d comments", constants.CommentsIcon, numComments))
 		line := lipgloss.Height(title)
 		var renderedActivities []string
-		for _, activity := range activities {
+		for i := 0; i < len(activities); i++ {
+			activity := activities[i]
+			if activity.Event != nil {
+				var events []data.TimelineItem
+				for ; i < len(activities) && activities[i].Event != nil; i++ {
+					events = append(events, *activities[i].Event)
+				}
+				i--
+				if rendered := m.renderTimelineItems(events); rendered != "" {
+					renderedActivities = append(renderedActivities, rendered)
+					line += lipgloss.Height(rendered)
+				}
+				continue
+			}
 			renderedActivities = append(renderedActivities, activity.RenderedString)
 			anchors = append(anchors, common.CommentAnchor{
 				Line:   line,
@@ -123,6 +157,7 @@ func renderEmptyState() string {
 
 type comment struct {
 	Author    string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 	Body      string
 	Path      *string
