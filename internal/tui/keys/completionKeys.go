@@ -35,7 +35,7 @@ var CmpKeys = CmpKeyMap{
 	),
 	ToggleSuggestions: key.NewBinding(
 		key.WithKeys("ctrl+h"),
-		key.WithHelp("ctrl+h", "toggle"),
+		key.WithHelp("ctrl+h", "toggle suggestions"),
 	),
 }
 

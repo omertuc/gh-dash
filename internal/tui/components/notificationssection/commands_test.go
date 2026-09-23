@@ -3,6 +3,8 @@ package notificationssection
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/config"
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/notificationrow"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/theme"
 )
@@ -108,7 +111,8 @@ func TestCheckoutPRErrorMessage(t *testing.T) {
 		t.Fatal("CheckoutPR() expected error, got nil")
 	}
 
-	expectedMsg := "local path to repo not specified, set one in your config.yml under repoPaths"
+	expectedMsg := "no local clone of owner/repo known: add it under repoPaths in your config.yml " +
+		"or run gh-dash from inside it"
 	if err.Error() != expectedMsg {
 		t.Errorf("CheckoutPR() error = %q, want %q", err.Error(), expectedMsg)
 	}
@@ -138,7 +142,7 @@ func TestMarkAsDoneStoresCorrectTimestamp(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	store := data.NewDoneStoreForTesting(filepath.Join(tempDir, "done.json"))
+	store := data.NewDoneStoreForTesting(t, filepath.Join(tempDir, "done.db"))
 	restoreStore := data.OverrideDoneStoreForTesting(store)
 	defer restoreStore()
 
@@ -251,5 +255,196 @@ func TestUpdateNotificationKeepsCursorOnNewLastItem(t *testing.T) {
 
 	if got := current.GetId(); got != "notif-B" {
 		t.Fatalf("GetCurrNotification().GetId() = %q, want %q", got, "notif-B")
+	}
+}
+
+func TestDoneStoreChangedHidesNewlyDoneRows(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../../../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to parse config: %v", err)
+	}
+
+	ctx := &context.ProgramContext{
+		Config: &cfg,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	store := data.NewDoneStoreForTesting(t, filepath.Join(t.TempDir(), "done.db"))
+	restoreStore := data.OverrideDoneStoreForTesting(store)
+	defer restoreStore()
+
+	t1 := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	m := NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	m.Notifications = []notificationrow.Data{
+		{Notification: data.NotificationData{Id: "notif-A", UpdatedAt: t1}},
+		{Notification: data.NotificationData{Id: "notif-B", UpdatedAt: t1}},
+		{Notification: data.NotificationData{Id: "notif-C", UpdatedAt: t1}},
+	}
+	m.TotalCount = len(m.Notifications)
+	m.Table.SetRows(m.BuildRows())
+	m.LastItem()
+	m.sessionMarkedDone["notif-D"] = true
+
+	// Done as of an older update, so notif-B stays visible.
+	store.MarkDone("notif-B", t1.Add(-time.Hour))
+	store.MarkDone("notif-C", t1)
+	m.Update(DoneStoreChangedMsg{Undone: []string{"notif-D"}})
+
+	var ids []string
+	for _, n := range m.Notifications {
+		ids = append(ids, n.GetId())
+	}
+	if want := []string{"notif-A", "notif-B"}; !slices.Equal(ids, want) {
+		t.Fatalf("notifications = %v, want %v", ids, want)
+	}
+	if got := m.CurrRow(); got != 1 {
+		t.Errorf("CurrRow() = %d, want 1", got)
+	}
+	if m.sessionMarkedDone["notif-D"] {
+		t.Error("undone notification should no longer be hidden for the session")
+	}
+}
+
+func TestNotificationUpdatesRerenderOnlyAffectedRow(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../../../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to parse config: %v", err)
+	}
+
+	ctx := &context.ProgramContext{
+		Config: &cfg,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	m := NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	m.Notifications = []notificationrow.Data{
+		{Notification: data.NotificationData{Id: "notif-A", Unread: true}},
+		{Notification: data.NotificationData{Id: "notif-B", Unread: true}},
+		{Notification: data.NotificationData{Id: "notif-C", Unread: true}},
+	}
+	m.Table.SetRows(m.BuildRows())
+	before := slices.Clone(m.Table.Rows)
+
+	m.Update(UpdateNotificationCommentsMsg{Id: "notif-B", NewCommentsCount: 3})
+	m.Update(UpdateNotificationReadStateMsg{Id: "notif-C", Unread: false})
+
+	expected := m.BuildRows()
+	for i := range expected {
+		if !slices.Equal(m.Table.Rows[i], expected[i]) {
+			t.Fatalf("row %d is stale after update", i)
+		}
+	}
+	if !slices.Equal(m.Table.Rows[0], before[0]) {
+		t.Fatal("unaffected row 0 changed")
+	}
+	if slices.Equal(m.Table.Rows[1], before[1]) || slices.Equal(m.Table.Rows[2], before[2]) {
+		t.Fatal("updated rows were not re-rendered")
+	}
+}
+
+func TestLoadingSpinnerShownInsteadOfTipWhileFirstPageLoads(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../../../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to parse config: %v", err)
+	}
+
+	ctx := &context.ProgramContext{
+		Config:            &cfg,
+		MainContentWidth:  100,
+		MainContentHeight: 30,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	m := NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	m.UpdateProgramContext(ctx)
+
+	m.SetIsLoading(true)
+	if view := m.GetMainContent(); !strings.Contains(view, "Loading") || strings.Contains(view, "Tip") {
+		t.Fatalf("expected loading spinner, not the tip, while loading:\n%s", view)
+	}
+
+	m.SetIsLoading(false)
+	if view := m.GetMainContent(); !strings.Contains(view, "Tip") {
+		t.Fatalf("expected the tip when not loading and there are no rows:\n%s", view)
+	}
+}
+
+func TestUnsubscribeMarksAsDone(t *testing.T) {
+	var calls []string
+	origUnsub := unsubscribeFromThreadFunc
+	unsubscribeFromThreadFunc = func(id string) error {
+		calls = append(calls, "unsubscribe:"+id)
+		return nil
+	}
+	defer func() { unsubscribeFromThreadFunc = origUnsub }()
+	origDone := markNotificationDoneFunc
+	markNotificationDoneFunc = func(id string) error {
+		calls = append(calls, "done:"+id)
+		return nil
+	}
+	defer func() { markNotificationDoneFunc = origDone }()
+
+	store := data.NewDoneStoreForTesting(t, filepath.Join(t.TempDir(), "done.db"))
+	restoreStore := data.OverrideDoneStoreForTesting(store)
+	defer restoreStore()
+
+	updatedAt := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
+	m := Model{
+		Notifications: []notificationrow.Data{
+			{Notification: data.NotificationData{Id: "notif-A", UpdatedAt: updatedAt}},
+		},
+		sessionMarkedDone: make(map[string]bool),
+		sessionMarkedRead: make(map[string]bool),
+	}
+	m.Ctx = &context.ProgramContext{
+		StartTask: noopStartTask,
+	}
+
+	cmd := m.unsubscribe()
+	if cmd == nil {
+		t.Fatal("unsubscribe() returned nil cmd")
+	}
+
+	// tea.Batch collapses to the lone non-nil cmd, but handle a BatchMsg too.
+	var finished *constants.TaskFinishedMsg
+	msgs := []tea.Msg{cmd()}
+	if cmds, ok := msgs[0].(tea.BatchMsg); ok {
+		msgs = nil
+		for _, c := range cmds {
+			if c != nil {
+				msgs = append(msgs, c())
+			}
+		}
+	}
+	for _, msg := range msgs {
+		if msg, ok := msg.(constants.TaskFinishedMsg); ok {
+			finished = &msg
+		}
+	}
+
+	if want := []string{"unsubscribe:notif-A", "done:notif-A"}; !slices.Equal(calls, want) {
+		t.Errorf("API calls = %v, want %v", calls, want)
+	}
+	if !store.IsDone("notif-A", updatedAt) {
+		t.Error("DoneStore should have notif-A marked done")
+	}
+	if finished == nil {
+		t.Fatal("expected a TaskFinishedMsg")
+	}
+	update, ok := finished.Msg.(UpdateNotificationMsg)
+	if !ok || update.Id != "notif-A" || !update.IsRemoved {
+		t.Errorf("finished.Msg = %#v, want removal of notif-A", finished.Msg)
 	}
 }

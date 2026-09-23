@@ -24,6 +24,7 @@ type Data struct {
 	Actor               string // Username of the user who triggered the notification
 	ActivityDescription string // Human-readable description of the activity (e.g., "@user commented on this PR")
 	ResolvedUrl         string // Async-resolved URL (e.g., for CheckSuite -> specific workflow run)
+	HasDraft            bool   // An unsent comment is being kept for this notification's subject
 }
 
 func (d Data) GetTitle() string {

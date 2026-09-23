@@ -14,6 +14,26 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
 )
 
+// openUrlInBrowser opens the given URL in the browser, e.g. a check's page.
+func (m *Model) openUrlInBrowser(url string) tea.Cmd {
+	taskId := fmt.Sprintf("open_browser_%d", time.Now().Unix())
+	task := context.Task{
+		Id:           taskId,
+		StartText:    "Opening in browser",
+		FinishedText: "Opened in browser",
+		State:        context.TaskStart,
+		Error:        nil,
+	}
+	startCmd := m.ctx.StartTask(task)
+	openCmd := func() tea.Msg {
+		// Discard the launcher's output, as openBrowser does
+		b := browser.New("", io.Discard, io.Discard)
+		err := b.Browse(url)
+		return constants.TaskFinishedMsg{TaskId: taskId, Err: err}
+	}
+	return tea.Batch(startCmd, openCmd)
+}
+
 func (m *Model) openBrowser() tea.Cmd {
 	taskId := fmt.Sprintf("open_browser_%d", time.Now().Unix())
 	task := context.Task{

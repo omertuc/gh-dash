@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -56,4 +57,34 @@ func GetRepoLocalPath(repoName string, cfgPaths map[string]string) (string, bool
 	}
 
 	return "", false
+}
+
+// ResolveRepoLocalPath returns the local clone of repoName, looking it up in
+// the repoPaths config first and falling back to the repo gh-dash was started
+// from (currentRepoName at currentRepoPath) when it is the same GitHub repo.
+// A leading ~ in the returned path is expanded to the user's home directory.
+func ResolveRepoLocalPath(
+	repoName string,
+	cfgPaths map[string]string,
+	currentRepoName string,
+	currentRepoPath string,
+) (string, error) {
+	repoPath, ok := GetRepoLocalPath(repoName, cfgPaths)
+	if !ok {
+		if currentRepoPath == "" || !strings.EqualFold(currentRepoName, repoName) {
+			return "", fmt.Errorf(
+				"no local clone of %s known: add it under repoPaths in your config.yml "+
+					"or run gh-dash from inside it",
+				repoName,
+			)
+		}
+		repoPath = currentRepoPath
+	}
+
+	if rest, found := strings.CutPrefix(repoPath, "~"); found {
+		if home, err := os.UserHomeDir(); err == nil {
+			repoPath = home + rest
+		}
+	}
+	return repoPath, nil
 }

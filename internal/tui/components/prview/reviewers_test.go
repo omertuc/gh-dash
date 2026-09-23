@@ -25,7 +25,7 @@ func newTestModel(
 }
 
 func newTestModelWithWidth(
-	t *testing.T,
+	t testing.TB,
 	prData *data.PullRequestData,
 	reviews []data.Review,
 	reviewers []data.ReviewRequestNode,

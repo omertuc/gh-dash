@@ -200,7 +200,7 @@ func TestRenderChecks_AwaitingApproval(t *testing.T) {
 	}
 
 	m := newTestModelForChecks(t, opts)
-	got := m.renderChecks()
+	got, _ := m.renderChecks()
 
 	// Should show "Awaiting Approval" section header
 	require.True(t, strings.Contains(got, "Awaiting Approval"),
@@ -235,7 +235,7 @@ func TestRenderChecks_PendingCheckSuites(t *testing.T) {
 	}
 
 	m := newTestModelForChecks(t, opts)
-	got := m.renderChecks()
+	got, _ := m.renderChecks()
 
 	// Should show "Pending" section header
 	require.True(t, strings.Contains(got, "Pending"),
@@ -273,7 +273,7 @@ func TestRenderChecks_RequiredButNotReported(t *testing.T) {
 	}
 
 	m := newTestModelForChecks(t, opts)
-	got := m.renderChecks()
+	got, _ := m.renderChecks()
 
 	// Should show "Pending" section for unreported required checks
 	require.True(t, strings.Contains(got, "Pending"),
@@ -328,7 +328,7 @@ func TestRenderChecks_MixedStates(t *testing.T) {
 	}
 
 	m := newTestModelForChecks(t, opts)
-	got := m.renderChecks()
+	got, _ := m.renderChecks()
 
 	// Should have "Awaiting Approval" section
 	require.True(t, strings.Contains(got, "Awaiting Approval"),
@@ -368,7 +368,7 @@ func TestRenderChecks_NoChecks(t *testing.T) {
 	}
 
 	m := newTestModelForChecks(t, opts)
-	got := m.renderChecks()
+	got, _ := m.renderChecks()
 
 	require.True(t, strings.Contains(got, "No checks to display"),
 		"expected 'No checks to display...' message, got: %q", got)
@@ -389,7 +389,7 @@ func TestRenderChecks_FailedChecks(t *testing.T) {
 	}
 
 	m := newTestModelForChecks(t, opts)
-	got := m.renderChecks()
+	got, _ := m.renderChecks()
 
 	// Should show both checks
 	require.True(t, strings.Contains(got, "build"),
@@ -421,7 +421,7 @@ func TestRenderChecks_InProgressChecks(t *testing.T) {
 	}
 
 	m := newTestModelForChecks(t, opts)
-	got := m.renderChecks()
+	got, _ := m.renderChecks()
 
 	// Should show both checks
 	require.True(t, strings.Contains(got, "build"),

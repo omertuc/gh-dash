@@ -22,6 +22,13 @@ type NotificationKeyMap struct {
 	SortByRepo           key.Binding
 	SwitchToPRs          key.Binding
 	ToggleSmartFiltering key.Binding
+	ReplyToComment       key.Binding
+	ViewCommitFiles      key.Binding
+	OpenCheck            key.Binding
+	ContinueDraft        key.Binding
+	DiscardDraft         key.Binding
+	NextMatch            key.Binding
+	PrevMatch            key.Binding
 }
 
 var NotificationKeys = NotificationKeyMap{
@@ -73,6 +80,39 @@ var NotificationKeys = NotificationKeyMap{
 		key.WithKeys("t"),
 		key.WithHelp("t", "toggle smart filtering"),
 	),
+	// Only while a comment is focused in an open notification
+	ReplyToComment: key.NewBinding(
+		key.WithKeys(">"),
+		key.WithHelp(">", "reply to comment"),
+	),
+	// Only while a commit is focused in an open notification's PR
+	ViewCommitFiles: key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "view commit's files"),
+	),
+	// Only while a check is focused in an open notification's PR
+	OpenCheck: key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "open check in browser"),
+	),
+	// Only while a comment draft is detached from in an open notification
+	ContinueDraft: key.NewBinding(
+		key.WithKeys("i"),
+		key.WithHelp("i", "continue draft"),
+	),
+	DiscardDraft: key.NewBinding(
+		key.WithKeys("ctrl+x"),
+		key.WithHelp("ctrl+x", "discard draft"),
+	),
+	// Only after searching an open notification's PR/Issue with /
+	NextMatch: key.NewBinding(
+		key.WithKeys("n"),
+		key.WithHelp("n", "next match"),
+	),
+	PrevMatch: key.NewBinding(
+		key.WithKeys("N"),
+		key.WithHelp("N", "previous match"),
+	),
 }
 
 func NotificationFullHelp() []key.Binding {
@@ -89,6 +129,13 @@ func NotificationFullHelp() []key.Binding {
 		NotificationKeys.SortByRepo,
 		NotificationKeys.SwitchToPRs,
 		NotificationKeys.ToggleSmartFiltering,
+		NotificationKeys.ReplyToComment,
+		NotificationKeys.ViewCommitFiles,
+		NotificationKeys.OpenCheck,
+		NotificationKeys.ContinueDraft,
+		NotificationKeys.DiscardDraft,
+		NotificationKeys.NextMatch,
+		NotificationKeys.PrevMatch,
 	}
 }
 
@@ -141,6 +188,20 @@ func rebindNotificationKeys(keys []config.Keybinding) error {
 			key = &NotificationKeys.SwitchToPRs
 		case "toggleSmartFiltering":
 			key = &NotificationKeys.ToggleSmartFiltering
+		case "replyToComment":
+			key = &NotificationKeys.ReplyToComment
+		case "viewCommitFiles":
+			key = &NotificationKeys.ViewCommitFiles
+		case "openCheck":
+			key = &NotificationKeys.OpenCheck
+		case "continueDraft":
+			key = &NotificationKeys.ContinueDraft
+		case "discardDraft":
+			key = &NotificationKeys.DiscardDraft
+		case "nextMatch":
+			key = &NotificationKeys.NextMatch
+		case "prevMatch":
+			key = &NotificationKeys.PrevMatch
 		default:
 			return fmt.Errorf("unknown built-in notification key: '%s'", notifKey.Builtin)
 		}

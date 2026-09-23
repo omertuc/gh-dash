@@ -19,6 +19,14 @@ type UpdateIssueMsg struct {
 	IsClosed         *bool
 	AddedAssignees   *data.Assignees
 	RemovedAssignees *data.Assignees
+	// PostedComment is a pending comment, added by NewComment, that's now
+	// posted
+	PostedComment *data.IssueComment
+	// RemovedComment is a pending comment, added by NewComment, that failed
+	// to post
+	RemovedComment *data.IssueComment
+	// CommentedOn is the issue NewComment or PostedComment is on
+	CommentedOn data.RowData
 }
 
 func CloseIssue(
@@ -160,6 +168,13 @@ func CommentOnIssue(
 	body string,
 ) tea.Cmd {
 	issueNumber := issue.GetNumber()
+	// Shown grayed out until it's posted
+	comment := data.IssueComment{
+		Author:    struct{ Login string }{Login: ctx.User},
+		Body:      body,
+		UpdatedAt: time.Now(),
+	}
+	ctx.AddPendingComment(context.NewPendingComment(body, comment.UpdatedAt), issue.GetUrl())
 	return fireTask(ctx, GitHubTask{
 		Id: fmt.Sprintf("issue_comment_%d", issueNumber),
 		Args: []string{
@@ -174,14 +189,19 @@ func CommentOnIssue(
 		Section:      section,
 		StartText:    fmt.Sprintf("Commenting on issue #%d", issueNumber),
 		FinishedText: fmt.Sprintf("Commented on issue #%d", issueNumber),
+		StartMsg: UpdateIssueMsg{
+			IssueNumber: issueNumber,
+			NewComment:  &comment,
+			CommentedOn: issue,
+		},
 		Msg: func(c *exec.Cmd, err error) tea.Msg {
+			if err != nil {
+				return UpdateIssueMsg{IssueNumber: issueNumber, RemovedComment: &comment}
+			}
 			return UpdateIssueMsg{
-				IssueNumber: issueNumber,
-				NewComment: &data.IssueComment{
-					Author:    struct{ Login string }{Login: ctx.User},
-					Body:      body,
-					UpdatedAt: time.Now(),
-				},
+				IssueNumber:   issueNumber,
+				CommentedOn:   issue,
+				PostedComment: &comment,
 			}
 		},
 	})

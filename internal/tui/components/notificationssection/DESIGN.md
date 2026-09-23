@@ -15,7 +15,9 @@ internal/
 │   ├── bookmarks.go             # Local bookmark storage (singleton)
 │   ├── donestore.go             # Timestamp-based Done tracking (singleton)
 │   ├── donestore_test.go        # Tests for Done store
-│   └── donestore_testing.go     # Test helpers (create/override DoneStore)
+│   ├── donestore_testing.go     # Test helpers (create/override DoneStore)
+│   ├── notificationsubjects.go  # Cache of notifications' PRs/Issues (SubjectCache)
+│   └── cachefile.go             # Files under ~/.cache/gh-dash
 ├── tui/
 │   ├── keys/
 │   │   └── notificationKeys.go  # Key bindings specific to notifications
@@ -27,6 +29,7 @@ internal/
 │       │   └── notificationrow_test.go # Tests for rendering logic
 │       ├── notificationssection/
 │       │   ├── notificationssection.go # Main section component
+│       │   ├── cache.go         # Rows cached on disk, shown on startup
 │       │   ├── commands.go      # Tea commands (mark done, mark read, diff, checkout, etc.)
 │       │   ├── commands_test.go # Tests for command functions
 │       │   └── filters_test.go  # Tests for filter parsing
@@ -175,20 +178,31 @@ The DoneStore records timestamps, not just IDs:
 
 ```go
 type DoneStore struct {
-    entries  map[string]time.Time // id -> updatedAt when marked done
-    filePath string
-    // ... mutex
+    db      *sql.DB              // SQLite database
+    entries map[string]time.Time // cache: id -> updatedAt when marked done
+    // ... mutex, change notification
 }
 ```
 
 When marking a notification as Done, the store records the notification’s current `updated_at` timestamp. When checking whether a notification is still Done, `IsDone(id, updatedAt)` compares the stored timestamp against the notification’s current `updated_at`: if the notification has been updated since it was Done (new comments, state changes, etc.), it resurfaces automatically. This prevents notifications with new activity from being permanently hidden.
 
-- Stored in `~/.local/state/gh-dash/done.json` as a JSON object mapping IDs to RFC 3339 timestamps: `{"id": "2024-01-15T10:30:00Z", ...}`
+- Stored in the SQLite database `~/.local/state/gh-dash/done.db` (honors `XDG_STATE_HOME`), in the table `done (id TEXT PRIMARY KEY, updated_at INTEGER)` with `updated_at` in unix seconds
 - Accessed via `data.GetDoneStore()` singleton
-- Backward-compatible: loads the legacy format (plain JSON array of IDs) used by older versions; legacy entries are assigned the zero time and pruned on load
+- Schema changes are migrations tracked by `PRAGMA user_version`
 - Persists across sessions and application restarts
 
-**Pruning:** On load, the DoneStore removes stale entries, to prevent the file from growing indefinitely. Entries older than 90 days are pruned — because those are unlikely to still appear in API responses. Zero-time entries (from the legacy format) are also pruned, since removing them from the store has the same effect as keeping them: `IsDone` returns false either way, so active notifications still resurface.
+**Outside writes:** Other processes may modify the database, e.g. to mark a notification done as of now:
+
+```sh
+sqlite3 ~/.local/state/gh-dash/done.db \
+  "INSERT OR REPLACE INTO done (id, updated_at) VALUES ('<thread id>', unixepoch())"
+```
+
+While running, gh-dash polls `PRAGMA data_version` every second and reloads the table when another connection has committed. Rows that become done are hidden from the list right away. When rows are deleted (or their timestamp is moved back), those notifications are refetched so they can resurface, and they're no longer hidden for the rest of the session.
+
+**Upgrading from `done.json`:** Older versions stored done notifications in `~/.local/state/gh-dash/done.json`. The migration that creates the `done` table imports that file in the same transaction, so it happens exactly once, even when several instances start at the same time. The JSON file is left untouched so downgrading still works. Plain-array entries from the oldest format carry no timestamp and are skipped, as they always resurfaced anyway; a corrupt file is logged and skipped.
+
+**Pruning:** On open, entries older than 90 days are deleted, to prevent the table from growing indefinitely — those are unlikely to still appear in API responses.
 
 **Pagination with local filtering:** Because Done notifications are filtered out locally after fetching from the API, a single page of results may yield very few visible notifications. To handle this, the fetch logic automatically requests additional pages from the API until the requested limit is reached or all pages are exhausted. This ensures users see a full page of results even when many notifications have been marked as Done.
 
@@ -197,8 +211,7 @@ When marking a notification as Done, the store records the notification’s curr
 The unsubscribe feature allows users to stop receiving notifications for a thread:
 
 - Uses GitHub's `DELETE /notifications/threads/{id}/subscription` API
-- Removes the subscription without marking the notification as Done
-- Useful for threads that are no longer relevant but shouldn't be deleted
+- Also marks the notification as Done (and records it in the done store), matching GitHub's notifications UI
 
 #### 10. State Management
 
@@ -224,7 +237,7 @@ Notification commands are organized in `commands.go`, following the pattern esta
 - `markAllAsDone()` — Marks all visible notifications as Done (persists each ID + `updated_at` to DoneStore)
 - `markAsRead()` — Marks the current notification as read
 - `markAllAsRead()` — Marks all notifications as read
-- `unsubscribe()` — Unsubscribes from the current thread
+- `unsubscribe()` — Unsubscribes from the current thread and marks it as done
 - `openInBrowser()` — Marks as read and opens in browser
 
 **Standalone functions** — Commands that require data from outside the section (e.g., the PR shown in the sidebar). These are called from `ui.go` with the necessary parameters:
@@ -283,6 +296,31 @@ The table component was extended to support per-column alignment via an `Align` 
 | s | Switch to PRs view |
 | o | Open in browser |
 | Enter | View notification (fetches content, marks as read) |
+
+### Viewing a Notification's PR/Issue
+
+Once a notification's PR or Issue is opened, the preview takes over the whole screen and the notifications list is hidden (`ProgramContext.PreviewFullscreen`). Going back to the notification brings the list back. The section keeps its dimensions while hidden, so it doesn't need a relayout on return.
+
+### Caching and Prefetching
+
+Notifications should never make the user wait: not on startup, and not when opening one after another.
+
+**Rows on startup.** Each section's rows are cached in `~/.cache/gh-dash/notifications-<hash>.json` (honors `XDG_CACHE_HOME`), keyed by the section's search, so sections with different filters don't share rows. On startup the cached rows are shown right away, minus any marked done since, while the section is fetched. `SetIsLoading` keeps them visible instead of replacing them with the table's spinner, and the pager shows a spinner with "Refreshing… • cached <time>" until the fresh rows arrive. If fetching fails, the pager keeps marking the rows as cached. Once the fresh rows arrive they replace the cached ones:
+
+- The cursor stays on the same notification, at the same place on screen, even if others came in or went away above it (`table.ReplaceRows`). This matters when a notification is already open. If the notification itself is gone, the cursor moves to the nearest one after it that's still there.
+- The fetch may have started before things the user did while it ran, so those win over it (`applySessionActions`): notifications marked done this session are left out, and ones marked read stay read unless they were updated since. Shown notifications the fetch lacks are kept if they're the current one (it may be open) or were marked read this session (opening one marks it read, so a fetch started before that leaves it out), unless they're done (`keepShown`). The fetch works on copies of the session state, as the section keeps changing it meanwhile.
+- The open PR/Issue always belongs to the selected notification. Should another one ever get selected behind it, it's dropped before any key is handled (`dropStaleNotificationSubject`), so actions like diff can't act on a notification other than the one selected.
+- Details fetched in the background (comment counts, actor, state) are kept for rows whose `updated_at` hasn't changed, so they don't blank out.
+
+Writes are coalesced (500ms) and atomic. Only fetched rows are cached, never rows shown from the cache, and only as many as the first fetch brings (`notificationsLimit`, at most 100), so the cursor can't be on a cached row that the fresh ones don't include just because it's further down. Test binaries never touch the user's cache (`data.SetCacheDirForTesting`).
+
+**PRs/Issues ahead of time.** `data.SubjectCache` keeps the PRs/Issues of notifications, keyed by URL. Concurrent fetches of the same subject share one request. A subject is fetched again once its notification's `updated_at` moves past the one it was fetched for, or when a background fetch finds it older than `SubjectMaxAge` (5 minutes). The comment-count fetches go through this cache, so every PR/Issue in the list is fetched once and reused for display.
+
+On top of that, `ui.go` prefetches the notifications around the cursor: the current one, the 5 below it and the 1 above it (`prefetchAhead`/`prefetchBehind`). It checks after every update, including every cursor move, so moving down even once starts on the next notification further down. These fetches run immediately, ahead of the queued comment-count fetches. A failed prefetch is retried after 30 seconds, without showing an error.
+
+**Prerendering.** Once a nearby notification's PR/Issue is fetched, its markdown is rendered in the background at the width it's shown at once opened: full screen, `openNotificationContentWidth()`. `prview`/`issueview.MarkdownPrerenderer` collect the same documents and widths the views render, so opening it hits the markdown render cache. Prerendering uses its own glamour renderers, so it never holds the lock the UI renders under.
+
+**Opening.** If the subject is cached, it's shown immediately, and refreshed in the background if it's older than `SubjectMaxAge`. Otherwise the preview goes full screen right away with a spinner (`isNotificationOpen()` also covers loading), and the fetch joins any prefetch already in flight. While it's loading, navigation keys scroll the preview rather than moving to another notification behind it. Esc goes back to the list, and the subject isn't opened if it arrives after that. Refreshing an open subject (`r`) also updates the cache.
 
 ### PR/Issue Keybindings in Notifications View
 

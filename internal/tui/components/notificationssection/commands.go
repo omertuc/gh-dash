@@ -1,12 +1,8 @@
 package notificationssection
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -21,6 +17,11 @@ import (
 // markNotificationDoneFunc is the function used to mark a notification as done
 // via the GitHub API. It is a variable so tests can override it.
 var markNotificationDoneFunc = data.MarkNotificationDone
+
+// unsubscribeFromThreadFunc is the function used to unsubscribe from a
+// notification thread via the GitHub API. It is a variable so tests can
+// override it.
+var unsubscribeFromThreadFunc = data.UnsubscribeFromThread
 
 func (m *Model) markAsDone() tea.Cmd {
 	notification := m.GetCurrNotification()
@@ -193,6 +194,8 @@ func (m *Model) markAsRead() tea.Cmd {
 	})
 }
 
+// unsubscribe unsubscribes from the current thread and marks it as done,
+// matching the behavior of GitHub's notifications UI.
 func (m *Model) unsubscribe() tea.Cmd {
 	notification := m.GetCurrNotification()
 	if notification == nil {
@@ -200,6 +203,7 @@ func (m *Model) unsubscribe() tea.Cmd {
 	}
 
 	notificationId := notification.GetId()
+	updatedAt := notification.Notification.UpdatedAt
 	taskId := fmt.Sprintf("notification_unsubscribe_%s", notificationId)
 	task := context.Task{
 		Id:           taskId,
@@ -210,22 +214,25 @@ func (m *Model) unsubscribe() tea.Cmd {
 	}
 	startCmd := m.Ctx.StartTask(task)
 	return tea.Batch(startCmd, func() tea.Msg {
-		err := data.UnsubscribeFromThread(notificationId)
+		err := unsubscribeFromThreadFunc(notificationId)
+		if err == nil {
+			err = markNotificationDoneFunc(notificationId)
+		}
+		if err == nil {
+			// Persist to done store so it stays hidden across sessions
+			data.GetDoneStore().MarkDone(notificationId, updatedAt)
+		}
 		return constants.TaskFinishedMsg{
 			SectionId:   m.Id,
 			SectionType: SectionType,
 			TaskId:      taskId,
 			Err:         err,
-			Msg: UnsubscribedMsg{
-				Id: notificationId,
+			Msg: UpdateNotificationMsg{
+				Id:        notificationId,
+				IsRemoved: err == nil,
 			},
 		}
 	})
-}
-
-// UnsubscribedMsg is sent when a notification thread is unsubscribed
-type UnsubscribedMsg struct {
-	Id string
 }
 
 // UpdateNotificationReadStateMsg is sent when a notification's read state changes
@@ -269,11 +276,9 @@ func (m *Model) openInBrowser() tea.Cmd {
 // CheckoutPR checks out a PR. This is a standalone function that can be called
 // from ui.go with the PR details from the notification view.
 func CheckoutPR(ctx *context.ProgramContext, prNumber int, repoName string) (tea.Cmd, error) {
-	repoPath, ok := common.GetRepoLocalPath(repoName, ctx.Config.RepoPaths)
-	if !ok {
-		return nil, errors.New(
-			"local path to repo not specified, set one in your config.yml under repoPaths",
-		)
+	repoPath, err := ctx.RepoLocalPath(repoName)
+	if err != nil {
+		return nil, err
 	}
 
 	taskId := fmt.Sprintf("checkout_%d", prNumber)
@@ -286,19 +291,7 @@ func CheckoutPR(ctx *context.ProgramContext, prNumber int, repoName string) (tea
 	}
 	startCmd := ctx.StartTask(task)
 	return tea.Batch(startCmd, func() tea.Msg {
-		c := exec.Command(
-			"gh",
-			"pr",
-			"checkout",
-			fmt.Sprint(prNumber),
-		)
-		userHomeDir, _ := os.UserHomeDir()
-		if strings.HasPrefix(repoPath, "~") {
-			repoPath = strings.Replace(repoPath, "~", userHomeDir, 1)
-		}
-
-		c.Dir = repoPath
-		err := c.Run()
+		err := common.RunCmdInDir(repoPath, "gh", "pr", "checkout", fmt.Sprint(prNumber))
 		return constants.TaskFinishedMsg{TaskId: taskId, Err: err}
 	}), nil
 }

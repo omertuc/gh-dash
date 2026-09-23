@@ -29,12 +29,32 @@ type UpdatePRMsg struct {
 	AddedAssignees   *data.Assignees
 	RemovedAssignees *data.Assignees
 	Labels           *data.PRLabels
+	// PostedComment is a pending comment, added by NewComment, that's now
+	// posted
+	PostedComment *data.Comment
+	// RemovedComment is a pending comment, added by NewComment, that failed
+	// to post
+	RemovedComment *data.Comment
+	// CommentedOn is the PR NewComment or PostedComment is on
+	CommentedOn data.RowData
 }
 
 type UpdateBranchMsg struct {
 	Name      string
 	IsCreated *bool
 	NewPr     *data.PullRequestData
+}
+
+// WithoutComment returns comments without c, e.g. a pending comment that
+// failed to post, leaving comments itself as is since it may be shared
+func WithoutComment[T comparable](comments []T, c T) []T {
+	var kept []T
+	for _, comment := range comments {
+		if comment != c {
+			kept = append(kept, comment)
+		}
+	}
+	return kept
 }
 
 func buildTaskId(prefix string, prNumber int) string {
@@ -48,6 +68,9 @@ type GitHubTask struct {
 	StartText    string
 	FinishedText string
 	Msg          func(c *exec.Cmd, err error) tea.Msg
+	// StartMsg, if set, is applied as soon as the task starts, e.g. to show
+	// a comment while it's being posted
+	StartMsg tea.Msg
 }
 
 func fireTask(ctx *context.ProgramContext, task GitHubTask) tea.Cmd {
@@ -60,6 +83,14 @@ func fireTask(ctx *context.ProgramContext, task GitHubTask) tea.Cmd {
 	}
 
 	startCmd := ctx.StartTask(start)
+	if task.StartMsg != nil {
+		started := constants.TaskStartedMsg{
+			SectionId:   task.Section.Id,
+			SectionType: task.Section.Type,
+			Msg:         task.StartMsg,
+		}
+		startCmd = tea.Sequence(func() tea.Msg { return started }, startCmd)
+	}
 	return tea.Batch(startCmd, func() tea.Msg {
 		log.Info("Running task", "cmd", "gh "+strings.Join(task.Args, " "))
 		c := exec.Command("gh", task.Args...)
@@ -351,6 +382,15 @@ func CommentOnPR(
 	body string,
 ) tea.Cmd {
 	prNumber := pr.GetNumber()
+	// Shown grayed out until it's posted
+	now := time.Now()
+	comment := data.Comment{
+		Author:    struct{ Login string }{Login: ctx.User},
+		Body:      body,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	ctx.AddPendingComment(context.NewPendingComment(body, now), pr.GetUrl())
 	return fireTask(ctx, GitHubTask{
 		Id: buildTaskId("pr_comment", prNumber),
 		Args: []string{
@@ -365,14 +405,15 @@ func CommentOnPR(
 		Section:      section,
 		StartText:    fmt.Sprintf("Commenting on PR #%d", prNumber),
 		FinishedText: fmt.Sprintf("Commented on PR #%d", prNumber),
+		StartMsg:     UpdatePRMsg{PrNumber: prNumber, NewComment: &comment, CommentedOn: pr},
 		Msg: func(c *exec.Cmd, err error) tea.Msg {
+			if err != nil {
+				return UpdatePRMsg{PrNumber: prNumber, RemovedComment: &comment}
+			}
 			return UpdatePRMsg{
-				PrNumber: prNumber,
-				NewComment: &data.Comment{
-					Author:    struct{ Login string }{Login: ctx.User},
-					Body:      body,
-					UpdatedAt: time.Now(),
-				},
+				PrNumber:      prNumber,
+				CommentedOn:   pr,
+				PostedComment: &comment,
 			}
 		},
 	})

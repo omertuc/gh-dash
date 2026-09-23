@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"image/color"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -28,7 +30,6 @@ import (
 
 var (
 	htmlCommentRegex = regexp.MustCompile("(?U)<!--(.|[[:space:]])*-->")
-	lineCleanupRegex = regexp.MustCompile(`((\n)+|^)([^\r\n]*\|[^\r\n]*(\n)?)+`)
 	foldBodyHeight   = 8
 )
 
@@ -38,26 +39,63 @@ type Model struct {
 	pr              *prrow.PullRequest
 	width           int
 	carousel        carousel.Model
+	tabsHint        string
+	activityCache   *activityCache
 	editor          cmpcontroller.Controller
 	summaryViewMore bool
+	// expandedCommit is the oid of the commit shown with its full message,
+	// e.g. the focused one
+	expandedCommit string
+	// expandedCheck identifies the check shown with its details, e.g. the
+	// focused one
+	expandedCheck string
+	// commitFiles narrows the files tab to a commit's files, or is nil to show
+	// all of the PR's files
+	commitFiles *commitFiles
+}
+
+// commitFiles are the files changed by a commit, shown in the files tab.
+type commitFiles struct {
+	oid            string
+	abbreviatedOid string
+	files          []data.ChangedFile
+	loading        bool
+	err            error
+}
+
+// CommitFilesMsg carries the files changed by a commit, once fetched.
+type CommitFilesMsg struct {
+	Oid   string
+	Files []data.ChangedFile
+	Err   error
 }
 
 var tabs = []string{" Overview", " Activity", " Commits", " Checks", " Files Changed"}
+
+const (
+	overviewTab = iota
+	activityTab
+	commitsTab
+	checksTab
+	filesTab
+)
 
 func NewModel(ctx *context.ProgramContext) Model {
 	c := carousel.NewModel(
 		carousel.WithItems(tabs),
 		carousel.WithWidth(ctx.MainContentWidth),
+		carousel.WithZonePrefix("pr-tab-"),
 	)
 
 	ta := inputbox.DefaultTextArea(ctx)
 	cmp := cmpcontroller.New(ctx, inputbox.ModelOpts{TextArea: &ta})
 
 	return Model{
-		ctx:      ctx,
-		pr:       nil,
-		carousel: c,
-		editor:   cmp,
+		ctx:           ctx,
+		pr:            nil,
+		carousel:      c,
+		editor:        cmp,
+		activityCache: &activityCache{},
 	}
 }
 
@@ -118,9 +156,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch {
 		case key.Matches(keyMsg, keys.PRKeys.PrevSidebarTab):
-			m.carousel.MoveLeft()
+			m.PrevTab()
 		case key.Matches(keyMsg, keys.PRKeys.NextSidebarTab):
-			m.carousel.MoveRight()
+			m.NextTab()
 		}
 	}
 
@@ -132,26 +170,199 @@ func (m Model) View() string {
 		return ""
 	}
 
+	return lipgloss.JoinVertical(lipgloss.Left, m.ViewHeader(), m.ViewBody())
+}
+
+// ViewBody renders the selected tab's content, without the header.
+func (m Model) ViewBody() string {
+	body, _ := m.ViewBodyWithAnchors()
+	return body
+}
+
+// ViewBodyWithAnchors renders the selected tab's content along with where each
+// comment starts, when the tab shows comments.
+func (m Model) ViewBodyWithAnchors() (string, []common.CommentAnchor) {
+	if !m.hasData() {
+		return "", nil
+	}
+
+	if m.carousel.Cursor() == activityTab {
+		// Cached, since it re-renders on every keystroke while writing a
+		// comment in the editor docked below it
+		return m.cachedActivity()
+	}
+
 	body := strings.Builder{}
-	switch m.carousel.SelectedItem() {
-	case tabs[0]:
+	var anchors []common.CommentAnchor
+	switch m.carousel.Cursor() {
+	case overviewTab:
 		body.WriteString(m.viewOverviewTab())
-	case tabs[1]:
-		body.WriteString(m.renderActivity())
-	case tabs[2]:
-		body.WriteString(m.renderCommits())
-	case tabs[3]:
-		body.WriteString(m.renderChecksOverview())
+	case commitsTab:
+		var commits string
+		commits, anchors = m.renderCommits()
+		body.WriteString(commits)
+	case checksTab:
+		overview := m.renderChecksOverview()
+		checks, checkAnchors := m.renderChecks()
+		body.WriteString(overview)
 		body.WriteString("\n\n")
-		body.WriteString(m.renderChecks())
-	case tabs[4]:
+		body.WriteString(checks)
+		// The checks start below the overview and the blank line after it
+		for _, a := range checkAnchors {
+			a.Line += lipgloss.Height(overview) + 1
+			anchors = append(anchors, a)
+		}
+	case filesTab:
 		body.WriteString(m.renderChangedFiles())
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.viewHeader(),
-		lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(body.String()),
-	)
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).
+		Render(body.String()), anchors
+}
+
+// ViewEditor renders the editor, docked below the preview's content, or ""
+// when it isn't open. A detached draft is shown compactly with detachedHint.
+func (m Model) ViewEditor(detachedHint string) string {
+	if !m.editor.Active() {
+		return ""
+	}
+	editor := m.editor.View()
+	if m.editor.Detached() {
+		editor = m.editor.DetachedView(detachedHint)
+	}
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).
+		Render(m.ctx.Styles.Sidebar.InputBox.Render(editor))
+}
+
+// HasDetachedDraft reports whether there's a comment being written that was
+// detached from to read the preview.
+func (m *Model) HasDetachedDraft() bool {
+	return m.editor.Detached() && m.editor.Mode() == cmpcontroller.ModeComment
+}
+
+// AttachDraft returns to a detached draft.
+func (m *Model) AttachDraft() tea.Cmd {
+	return m.editor.Attach()
+}
+
+// DetachDraft leaves the comment being written, keeping it as a draft.
+func (m *Model) DetachDraft() {
+	if m.editor.Mode() == cmpcontroller.ModeComment {
+		m.editor.Detach()
+	}
+}
+
+// DraftValue returns the comment being written, if any.
+func (m *Model) DraftValue() string {
+	if m.editor.Mode() != cmpcontroller.ModeComment {
+		return ""
+	}
+	return m.editor.Value()
+}
+
+// AppendToDraft adds text to the end of the comment being written, on its own
+// paragraph.
+func (m *Model) AppendToDraft(text string) {
+	m.editor.SetValue(common.AppendParagraph(m.editor.Value(), text))
+}
+
+// DiscardEditor closes the editor, dropping anything written in it.
+func (m *Model) DiscardEditor() {
+	if m.editor.Active() {
+		m.editor.Exit()
+	}
+}
+
+type activityCacheKey struct {
+	data       *prrow.Data
+	isEnriched bool
+	width      int
+	// The first element of each list, which changes when a list is
+	// replaced, e.g. when the PR is fetched again
+	comments    any
+	numComments int
+	reviews     any
+	numReviews  int
+	threads     any
+	numThreads  int
+	events      any
+	numEvents   int
+	// Pending comments are rendered differently once posted
+	numPending int
+	styles     *context.Styles
+	// Adaptive colors and the markdown style depend on it
+	hasDarkBackground bool
+	minute            time.Time // so times like "3m ago" stay current
+}
+
+// activityCache holds the last rendered activity tab. It's a pointer so
+// View, which has a value receiver, can fill it.
+type activityCache struct {
+	key     activityCacheKey
+	view    string
+	anchors []common.CommentAnchor
+}
+
+// cachedActivity renders the activity tab with its padding, reusing the last
+// render when nothing it shows has changed. The tab re-renders on every
+// keystroke while typing a reply, and rendering many comments is slow.
+func (m Model) cachedActivity() (string, []common.CommentAnchor) {
+	if m.activityCache == nil {
+		view, anchors := m.renderActivityWithAnchors()
+		return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(view), anchors
+	}
+	enriched := m.pr.Data.Enriched
+	key := activityCacheKey{
+		data:        m.pr.Data,
+		isEnriched:  m.pr.Data.IsEnriched,
+		width:       m.width,
+		numComments: len(enriched.Comments.Nodes),
+		numReviews:  len(enriched.Reviews.Nodes),
+		numThreads:  len(enriched.ReviewThreads.Nodes),
+		numEvents:   len(enriched.TimelineItems.Nodes),
+		numPending:  len(m.ctx.PendingComments),
+		styles:      &m.ctx.Styles,
+		minute:      time.Now().Truncate(time.Minute),
+
+		hasDarkBackground: m.ctx.HasDarkBackground,
+	}
+	if len(enriched.Comments.Nodes) > 0 {
+		key.comments = &enriched.Comments.Nodes[0]
+	}
+	if len(enriched.Reviews.Nodes) > 0 {
+		key.reviews = &enriched.Reviews.Nodes[0]
+	}
+	if len(enriched.ReviewThreads.Nodes) > 0 {
+		key.threads = &enriched.ReviewThreads.Nodes[0]
+	}
+	if len(enriched.TimelineItems.Nodes) > 0 {
+		key.events = &enriched.TimelineItems.Nodes[0]
+	}
+	if m.activityCache.key == key && m.activityCache.view != "" {
+		return m.activityCache.view, slices.Clone(m.activityCache.anchors)
+	}
+	view, anchors := m.renderActivityWithAnchors()
+	view = lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(view)
+	*m.activityCache = activityCache{key: key, view: view, anchors: slices.Clone(anchors)}
+	return view, anchors
+}
+
+// ViewHeader renders the part of the preview above the selected tab's
+// content: the PR's name, title, branches, author and the tab bar.
+func (m Model) ViewHeader() string {
+	if !m.hasData() {
+		return ""
+	}
+	return m.viewHeader()
+}
+
+// renderTabsHint renders a hint for the keys that switch tabs, e.g. "]→ [←",
+// shown at the right end of the tab bar.
+func (m *Model) renderTabsHint() string {
+	return lipgloss.NewStyle().
+		Foreground(m.ctx.Theme.FaintText).
+		Render(keys.HintKeys(keys.PRKeys.NextSidebarTab) + "→ " +
+			keys.HintKeys(keys.PRKeys.PrevSidebarTab) + "← ")
 }
 
 func (m *Model) viewHeader() string {
@@ -169,7 +380,7 @@ func (m *Model) viewHeader() string {
 	header.WriteString(lipgloss.NewStyle().Width(m.width).
 		Border(lipgloss.NormalBorder(), false, false, true, false).
 		BorderForeground(m.ctx.Theme.FaintBorder).
-		Render(m.carousel.View()),
+		Render(lipgloss.JoinHorizontal(lipgloss.Bottom, m.carousel.View(), m.tabsHint)),
 	)
 
 	header.WriteString("\n")
@@ -203,10 +414,6 @@ func (m *Model) viewOverviewTab() string {
 	)
 	body.WriteString("\n")
 	body.WriteString(m.renderChecksOverview())
-
-	if m.editor.Mode() != cmpcontroller.ModeNone {
-		body.WriteString(m.ctx.Styles.Sidebar.InputBox.Render(m.editor.View()))
-	}
 
 	return body.String()
 }
@@ -495,9 +702,7 @@ func (m *Model) renderAuthor() string {
 
 func (m *Model) renderSummary() string {
 	width := m.getIndentedContentWidth()
-	// Strip HTML comments from body and cleanup body.
-	body := htmlCommentRegex.ReplaceAllString(m.pr.Data.Enriched.Body, "")
-	body = lineCleanupRegex.ReplaceAllString(body, "")
+	body := summaryMarkdown(m.pr.Data.Enriched.Body)
 
 	desc := m.ctx.Styles.Common.MainTextStyle.Bold(true).Underline(true).Render(" Summary")
 	title := lipgloss.JoinVertical(
@@ -506,7 +711,6 @@ func (m *Model) renderSummary() string {
 		"",
 	)
 	sbody := lipgloss.NewStyle().Width(m.getIndentedContentWidth())
-	body = strings.TrimSpace(body)
 	if body == "" {
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
@@ -555,6 +759,13 @@ func (m *Model) SetSectionId(id int) {
 }
 
 func (m *Model) SetRow(d *prrow.Data) {
+	if m.pr == nil || d == nil || m.pr.Data.Primary.Url != d.Primary.Url {
+		// What's expanded and narrowed to belongs to the previous PR
+		m.expandedCommit = ""
+		m.expandedCheck = ""
+		m.commitFiles = nil
+		m.syncTabs()
+	}
 	if d == nil {
 		m.pr = nil
 	} else {
@@ -587,14 +798,19 @@ func (m *Model) EnrichCurrRow() tea.Cmd {
 
 func (m *Model) SetWidth(width int) {
 	m.width = width
-	m.carousel.SetWidth(width)
+	m.tabsHint = m.renderTabsHint()
+	// Only show the hint when it fits alongside all the tabs
+	if lipgloss.Width(m.tabsHint)+m.carousel.ItemsWidth() > width {
+		m.tabsHint = ""
+	}
+	m.carousel.SetWidth(width - lipgloss.Width(m.tabsHint))
 	m.editor.SetWidth(
 		m.getIndentedContentWidth() - m.ctx.Styles.Sidebar.InputBox.GetHorizontalFrameSize(),
 	)
 }
 
 func (m *Model) IsTextInputBoxFocused() bool {
-	return m.editor.Active()
+	return m.editor.Active() && !m.editor.Detached()
 }
 
 func (m *Model) UpdateProgramContext(ctx *context.ProgramContext) {
@@ -617,31 +833,78 @@ func (m *Model) GetIsCommenting() bool {
 }
 
 func (m *Model) SetIsCommenting(isCommenting bool) tea.Cmd {
-	if m.pr == nil {
-		return nil
-	}
-
 	if !isCommenting {
-		if m.editor.Mode() == cmpcontroller.ModeComment {
+		if m.pr != nil && m.editor.Mode() == cmpcontroller.ModeComment {
 			m.editor.Exit()
 		}
+		return nil
+	}
+	return m.StartComment("", false)
+}
+
+// StartComment opens the comment editor with text already in it, e.g. a
+// quoted comment to reply to. When detachable, esc leaves the editor keeping
+// the draft, rather than cancelling.
+func (m *Model) StartComment(text string, detachable bool) tea.Cmd {
+	if m.pr == nil {
 		return nil
 	}
 
 	m.editor.SetAutocompleteSource(&fuzzyselect.UserMentionSource{WithAtSymbol: true})
 	cmd := m.editor.Enter(cmpcontroller.EnterOptions{
+		InitialValue:                     text,
 		Mode:                             cmpcontroller.ModeComment,
 		Prompt:                           constants.CommentPrompt,
 		Repo:                             m.repoRef(),
 		EnterFetch:                       cmpcontroller.FetchSilent,
 		ConfirmDiscardOnCancel:           true,
 		HideAutocompleteWhenContextEmpty: true,
+		Detachable:                       detachable,
 	})
 	return cmd
 }
 
 func (m *Model) getIndentedContentWidth() int {
-	return m.width - 2*m.ctx.Styles.Sidebar.ContentPadding
+	return indentedContentWidth(m.ctx, m.width)
+}
+
+func indentedContentWidth(ctx *context.ProgramContext, width int) int {
+	return width - 2*ctx.Styles.Sidebar.ContentPadding
+}
+
+// summaryMarkdown is the markdown shown for a PR's description, without HTML
+// comments.
+func summaryMarkdown(body string) string {
+	return strings.TrimSpace(htmlCommentRegex.ReplaceAllString(body, ""))
+}
+
+// MarkdownPrerenderer returns a function that renders the markdown the
+// preview shows for pr, at the given preview width, into the markdown cache,
+// so showing it later is instant. It reads ctx, so it must be created on the
+// UI goroutine, while the function it returns is meant to run in the
+// background.
+func MarkdownPrerenderer(
+	ctx *context.ProgramContext,
+	pr *data.EnrichedPullRequestData,
+	width int,
+) func() {
+	renderer := markdown.GetMarkdownRenderer(indentedContentWidth(ctx, width), ctx)
+	var documents []string
+	if body := summaryMarkdown(pr.Body); body != "" {
+		documents = append(documents, body)
+	}
+	for _, thread := range pr.ReviewThreads.Nodes {
+		for _, c := range thread.Comments.Nodes {
+			documents = append(documents, c.Body)
+		}
+	}
+	for _, c := range pr.Comments.Nodes {
+		documents = append(documents, c.Body)
+	}
+	for _, review := range pr.Reviews.Nodes {
+		documents = append(documents, review.Body)
+	}
+	return func() { renderer.Prerender(documents...) }
 }
 
 func (m *Model) GetIsApproving() bool {
@@ -750,11 +1013,138 @@ func (m *Model) prAssignees() []string {
 }
 
 func (m *Model) GoToFirstTab() {
-	m.carousel.SetCursor(0)
+	m.setTab(overviewTab)
 }
 
 func (m *Model) GoToActivityTab() {
-	m.carousel.SetCursor(1) // Activity is the second tab (index 1)
+	m.setTab(activityTab)
+}
+
+func (m *Model) PrevTab() {
+	m.setTab(max(0, m.carousel.Cursor()-1))
+}
+
+func (m *Model) NextTab() {
+	m.setTab(min(len(tabs)-1, m.carousel.Cursor()+1))
+}
+
+// SelectTabAt selects the tab under the mouse. It reports whether the tab
+// changed.
+func (m *Model) SelectTabAt(msg tea.MouseMsg) bool {
+	tab := m.carousel.ItemAt(msg)
+	if tab < 0 || tab == m.carousel.Cursor() {
+		return false
+	}
+	m.setTab(tab)
+	return true
+}
+
+// setTab selects a tab. Leaving the files tab shows all of the PR's files
+// again. The expanded commit is kept, to focus it again on coming back.
+func (m *Model) setTab(tab int) {
+	m.carousel.SetCursor(tab)
+	if tab != filesTab {
+		m.commitFiles = nil
+	}
+	m.syncTabs()
+}
+
+// syncTabs names the tabs, with the files tab naming the commit it's narrowed
+// to, e.g. "Files Changed (abc1234)".
+func (m *Model) syncTabs() {
+	items := slices.Clone(tabs)
+	if m.commitFiles != nil {
+		items[filesTab] += " (" + m.commitFiles.abbreviatedOid + ")"
+	}
+	if slices.Equal(items, m.carousel.Items()) {
+		return
+	}
+	m.carousel.SetItems(items)
+	// The tabs' width changed, which decides whether the hint fits
+	m.SetWidth(m.width)
+}
+
+// IsCommitsTab reports whether the commits tab is selected.
+func (m Model) IsCommitsTab() bool {
+	return m.carousel.Cursor() == commitsTab
+}
+
+// SetFocusedCommit expands the commit at the given index to show its full
+// message, collapsing any other. It reports whether that changed anything.
+func (m *Model) SetFocusedCommit(i int) bool {
+	oid := ""
+	if m.hasData() {
+		if commits := m.pr.Data.Enriched.AllCommits.Nodes; i >= 0 && i < len(commits) {
+			oid = commits[i].Commit.Oid
+		}
+	}
+	if oid == m.expandedCommit {
+		return false
+	}
+	m.expandedCommit = oid
+	return true
+}
+
+// ExpandedCommitIndex returns the index of the commit shown with its full
+// message, or -1 when there's none.
+func (m Model) ExpandedCommitIndex() int {
+	if !m.hasData() || m.expandedCommit == "" {
+		return -1
+	}
+	for i, c := range m.pr.Data.Enriched.AllCommits.Nodes {
+		if c.Commit.Oid == m.expandedCommit {
+			return i
+		}
+	}
+	return -1
+}
+
+// ViewCommitFiles narrows the files tab to the files changed by the commit at
+// the given index and switches to it, returning the command fetching them.
+// With only one commit, it just switches to the files tab.
+func (m *Model) ViewCommitFiles(i int) tea.Cmd {
+	if !m.hasData() {
+		return nil
+	}
+	commits := m.pr.Data.Enriched.AllCommits.Nodes
+	if i < 0 || i >= len(commits) {
+		return nil
+	}
+	m.setTab(filesTab)
+	if len(commits) == 1 {
+		// The commit's files are the PR's files
+		return nil
+	}
+	commit := commits[i].Commit
+	m.commitFiles = &commitFiles{
+		oid:            commit.Oid,
+		abbreviatedOid: commit.AbbreviatedOid,
+		loading:        true,
+	}
+	m.syncTabs()
+
+	repo := m.pr.Data.Primary.GetRepoNameWithOwner()
+	oid := commit.Oid
+	return func() tea.Msg {
+		files, err := data.FetchCommitFiles(repo, oid)
+		return CommitFilesMsg{Oid: oid, Files: files, Err: err}
+	}
+}
+
+// SetCommitFiles shows the fetched files of the commit the files tab is
+// narrowed to. Files of a commit that's no longer shown are dropped.
+func (m *Model) SetCommitFiles(msg CommitFilesMsg) {
+	if m.commitFiles == nil || m.commitFiles.oid != msg.Oid {
+		return
+	}
+	m.commitFiles.loading = false
+	m.commitFiles.files = msg.Files
+	m.commitFiles.err = msg.Err
+}
+
+// IsFirstTab reports whether the first tab, the overview, is selected.
+func (m Model) IsFirstTab() bool {
+	return m.carousel.Cursor() == 0
 }
 
 func (m Model) SelectedTab() string {
@@ -770,7 +1160,7 @@ func (m *Model) SetSummaryViewLess() {
 }
 
 func (m *Model) SetEnrichedPR(data data.EnrichedPullRequestData) {
-	if m.pr.Data.Primary.Url == data.Url {
+	if m.pr != nil && m.pr.Data.Primary.Url == data.Url {
 		m.pr.Data.Enriched = data
 		m.pr.Data.IsEnriched = true
 	}

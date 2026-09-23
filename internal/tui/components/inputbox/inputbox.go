@@ -13,6 +13,7 @@ import (
 	"charm.land/log/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/fuzzyselect"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 )
@@ -26,12 +27,27 @@ type Model struct {
 	inputHelp help.Model
 	prompt    string
 	fzfSelect *fuzzyselect.Model
+	// detachable is whether esc detaches rather than cancels
+	detachable bool
 }
 
 var inputKeys = []key.Binding{
 	key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+d", "submit")),
 	key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("Ctrl+c/esc", "cancel")),
 	keys.CmpKeys.ToggleSuggestions,
+}
+
+var detachableInputKeys = []key.Binding{
+	key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+d", "submit")),
+	key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "detach")),
+	key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("Ctrl+c", "cancel")),
+	keys.CmpKeys.ToggleSuggestions,
+}
+
+// SetDetachable sets whether esc detaches from the input rather than
+// cancelling, for the help shown below it.
+func (m *Model) SetDetachable(detachable bool) {
+	m.detachable = detachable
 }
 
 const DefaultInputHeight = 5
@@ -42,6 +58,11 @@ func DefaultTextArea(ctx *context.ProgramContext) textarea.Model {
 	ta.Prompt = ""
 	ta.SetHeight(DefaultInputHeight)
 	ta.CharLimit = 65536
+	// Match textinput, which also binds the ctrl variants
+	ta.KeyMap.WordForward.SetKeys("alt+right", "ctrl+right", "alt+f")
+	ta.KeyMap.WordBackward.SetKeys("alt+left", "ctrl+left", "alt+b")
+	ta.KeyMap.DeleteWordBackward.SetKeys("alt+backspace", "ctrl+backspace", "ctrl+w")
+	ta.KeyMap.DeleteWordForward.SetKeys("alt+delete", "ctrl+delete", "alt+d")
 	base := lipgloss.NewStyle()
 	ta.SetStyles(textarea.Styles{
 		Focused: textarea.StyleState{
@@ -143,7 +164,22 @@ func (m Model) AutocompleteItemsToExclude() []string {
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case editorFinishedMsg:
+		value, err := readEditorResult(msg)
+		if err != nil {
+			return m, func() tea.Msg { return constants.ErrMsg{Err: err} }
+		}
+		m.SetValue(value)
+		if m.fzfSelect != nil {
+			m.fzfSelect.Hide()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.textArea != nil && key.Matches(msg, openEditorKey) {
+			return m, openInEditor(m.Value())
+		}
+
 		// Allow toggling suggestions at any time
 		if m.fzfSelect != nil && key.Matches(msg, keys.CmpKeys.ToggleSuggestions) {
 			if m.fzfSelect.IsVisible() {
@@ -161,11 +197,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		// Allow navigation/selection even if the popup is hidden (as long as there are filtered results)
 		if m.fzfSelect != nil &&
 			(m.fzfSelect.IsVisible() || m.fzfSelect.HasSuggestions()) {
+			// While the popup is hidden, the arrow keys move the cursor
+			isArrow := msg.String() == "up" || msg.String() == "down"
+			navigates := m.fzfSelect.IsVisible() || !isArrow
 			switch {
-			case key.Matches(msg, keys.CmpKeys.PrevKey):
+			case navigates && key.Matches(msg, keys.CmpKeys.PrevKey):
 				m.fzfSelect.Prev()
 				return m, nil
-			case key.Matches(msg, keys.CmpKeys.NextKey):
+			case navigates && key.Matches(msg, keys.CmpKeys.NextKey):
 				m.fzfSelect.Next()
 				return m, nil
 			case m.fzfSelect.Selected() != "" && key.Matches(msg, keys.CmpKeys.SelectKey):
@@ -234,11 +273,22 @@ func (m Model) View() string {
 			content,
 			lipgloss.NewStyle().
 				MarginTop(1).
-				Render(m.inputHelp.ShortHelpView(inputKeys)),
+				Render(m.inputHelp.ShortHelpView(m.helpKeys())),
 		)
 	}
 
 	return content
+}
+
+func (m Model) helpKeys() []key.Binding {
+	helpKeys := inputKeys
+	if m.detachable {
+		helpKeys = detachableInputKeys
+	}
+	if m.textArea != nil {
+		helpKeys = append(helpKeys[:len(helpKeys):len(helpKeys)], openEditorKey)
+	}
+	return helpKeys
 }
 
 func (m Model) ViewCompletions() string {
@@ -314,6 +364,8 @@ func (m *Model) Width() int {
 }
 
 func (m *Model) SetWidth(width int) {
+	// Keep the help from widening the input box beyond its width
+	m.inputHelp.SetWidth(width)
 	if m.textArea != nil {
 		m.textArea.SetWidth(width)
 		return

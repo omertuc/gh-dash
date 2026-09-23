@@ -10,6 +10,14 @@ type TaskFinishedMsg struct {
 	Msg         tea.Msg
 }
 
+// TaskStartedMsg carries a task's optimistic update, e.g. a comment being
+// posted, applied as soon as the task starts
+type TaskStartedMsg struct {
+	SectionId   int
+	SectionType string
+	Msg         tea.Msg
+}
+
 type ClearTaskMsg struct {
 	TaskId string
 }

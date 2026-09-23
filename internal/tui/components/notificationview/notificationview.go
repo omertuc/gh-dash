@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -26,12 +27,47 @@ type Model struct {
 
 	// Pending confirmation action for PR/Issue (e.g., "pr_close", "issue_reopen")
 	pendingAction string
+
+	// ID of the notification whose subject is being fetched, if any
+	loadingId      string
+	loadingSpinner spinner.Model
 }
 
 func NewModel(ctx *context.ProgramContext) Model {
 	return Model{
-		ctx: ctx,
+		ctx:            ctx,
+		loadingSpinner: spinner.New(spinner.WithSpinner(spinner.Dot)),
 	}
+}
+
+// StartLoading marks the subject of the given notification as being fetched
+// and returns the command that animates the spinner.
+func (m *Model) StartLoading(notificationId string) tea.Cmd {
+	m.loadingId = notificationId
+	return m.loadingSpinner.Tick
+}
+
+func (m *Model) StopLoading() {
+	m.loadingId = ""
+}
+
+func (m *Model) IsLoading() bool {
+	return m.loadingId != ""
+}
+
+func (m *Model) GetLoadingId() string {
+	return m.loadingId
+}
+
+// UpdateLoadingSpinner advances the spinner while loading. Ticks stop once
+// loading finishes.
+func (m *Model) UpdateLoadingSpinner(msg spinner.TickMsg) tea.Cmd {
+	if !m.IsLoading() {
+		return nil
+	}
+	var cmd tea.Cmd
+	m.loadingSpinner, cmd = m.loadingSpinner.Update(msg)
+	return cmd
 }
 
 func (m *Model) SetRow(row *notificationrow.Data) {
@@ -189,6 +225,16 @@ func (m Model) View() string {
 	s.WriteString(titleBlock)
 	s.WriteString("\n\n")
 
+	if m.loadingId == notification.Id {
+		m.loadingSpinner.Style = lipgloss.NewStyle().Foreground(m.ctx.Theme.SecondaryText)
+		s.WriteString(sectionStyle.Render(fmt.Sprintf(
+			"%s Loading %s...",
+			m.loadingSpinner.View(),
+			formatSubjectType(notification.Subject.Type),
+		)))
+		s.WriteString("\n")
+	}
+
 	// Type with icon
 	typeIcon := getTypeIcon(notification.Subject.Type)
 	typeRow := lipgloss.JoinHorizontal(lipgloss.Top,
@@ -299,6 +345,17 @@ func getTypeIcon(subjectType string) string {
 		return ""
 	default:
 		return ""
+	}
+}
+
+func formatSubjectType(subjectType string) string {
+	switch subjectType {
+	case "PullRequest":
+		return "pull request"
+	case "Issue":
+		return "issue"
+	default:
+		return strings.ToLower(subjectType)
 	}
 }
 

@@ -115,6 +115,16 @@ func (t *TestSection) LastItem() int {
 	panic("unimplemented")
 }
 
+// RowAt implements section.Section.
+func (t *TestSection) RowAt(msg tea.MouseMsg) int {
+	panic("unimplemented")
+}
+
+// SelectRow implements section.Section.
+func (t *TestSection) SelectRow(row int) int {
+	panic("unimplemented")
+}
+
 // MakeSectionCmd implements section.Section.
 func (t *TestSection) MakeSectionCmd(cmd tea.Cmd) tea.Cmd {
 	panic("unimplemented")
@@ -146,6 +156,10 @@ func (t *TestSection) ResetPageInfo() {
 }
 
 // ResetRows implements section.Section.
+// SetRows implements section.Section.
+func (t *TestSection) SetRows(rows []table.Row) {
+}
+
 func (t *TestSection) ResetRows() {
 	panic("unimplemented")
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	bbHelp "charm.land/bubbles/v2/help"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
 	zone "github.com/lrstanley/bubblezone/v2"
@@ -50,11 +51,11 @@ func (m Model) View() string {
 		footer = lipgloss.NewStyle().
 			Render("Really quit? (Press y/enter to confirm, any other key to cancel)")
 	} else {
-		helpIndicator := lipgloss.NewStyle().
+		helpIndicator := zone.Mark(helpZoneId, lipgloss.NewStyle().
 			Background(m.ctx.Theme.FaintText).
 			Foreground(m.ctx.Theme.SelectedBackground).
 			Padding(0, 1).
-			Render("? help")
+			Render("? help"))
 		donationIndicator := zone.Mark("donate", lipgloss.NewStyle().
 			Background(m.ctx.Theme.SelectedBackground).
 			Foreground(m.ctx.Theme.WarningText).
@@ -112,7 +113,39 @@ func (m *Model) UpdateProgramContext(ctx *context.ProgramContext) {
 	m.help.Styles = ctx.Styles.Help.BubbleStyles
 }
 
+const helpZoneId = "help"
+
+// switcherViews are the views that have a button in the view switcher
+var switcherViews = []config.ViewType{
+	config.NotificationsView,
+	config.PRsView,
+	config.IssuesView,
+}
+
+func viewZoneId(view config.ViewType) string {
+	return "view-" + string(view)
+}
+
+// ViewAt returns the view whose button is under the mouse, if any.
+func (m *Model) ViewAt(msg tea.MouseMsg) (config.ViewType, bool) {
+	for _, view := range switcherViews {
+		if zone.Get(viewZoneId(view)).InBounds(msg) {
+			return view, true
+		}
+	}
+	return "", false
+}
+
+// IsHelpAt reports whether the help button is under the mouse.
+func (m *Model) IsHelpAt(msg tea.MouseMsg) bool {
+	return zone.Get(helpZoneId).InBounds(msg)
+}
+
 func (m *Model) renderViewButton(view config.ViewType) string {
+	return zone.Mark(viewZoneId(view), m.renderViewButtonContent(view))
+}
+
+func (m *Model) renderViewButtonContent(view config.ViewType) string {
 	isActive := m.ctx.View == view
 
 	// Define icons and labels for each view

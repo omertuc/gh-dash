@@ -2,12 +2,14 @@ package notificationssection
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/log/v2"
@@ -169,6 +171,11 @@ type Model struct {
 	lastSidebarOpen   bool
 	sessionMarkedRead map[string]bool // IDs of notifications marked as read this session (kept visible until manual refresh)
 	sessionMarkedDone map[string]bool // IDs of notifications marked as done this session (excluded until manual refresh)
+	// showingCached is set while the rows shown are the ones cached on disk,
+	// until they're first fetched
+	showingCached bool
+	// refreshSpinner shows in the pager while cached rows are being refreshed
+	refreshSpinner spinner.Model
 }
 
 func NewModel(
@@ -202,6 +209,10 @@ func NewModel(
 	m.Notifications = []notificationrow.Data{}
 	m.sessionMarkedRead = make(map[string]bool)
 	m.sessionMarkedDone = make(map[string]bool)
+	m.refreshSpinner = spinner.New(
+		spinner.WithSpinner(spinner.Dot),
+		spinner.WithStyle(lipgloss.NewStyle().Foreground(ctx.Theme.SecondaryText)),
+	)
 
 	return m
 }
@@ -289,8 +300,8 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 		case key.Matches(msg, keys.NotificationKeys.ToggleBookmark):
 			if notification := m.GetCurrNotification(); notification != nil {
 				data.GetBookmarkStore().ToggleBookmark(notification.GetId())
-				// Rebuild rows to update bookmark indicator
-				m.Table.SetRows(m.BuildRows())
+				// Re-render the row to update the bookmark indicator
+				m.syncRow(m.Table.GetCurrItem())
 			}
 			return m, nil
 
@@ -315,24 +326,28 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 
 	case UpdateNotificationMsg:
 		if msg.IsRemoved {
-			for i, n := range m.Notifications {
-				if n.GetId() == msg.Id {
-					m.Notifications = append(m.Notifications[:i], m.Notifications[i+1:]...)
-					break
-				}
-			}
-			// Track as done so it doesn't reappear on refresh (GitHub API still returns it with all=true)
+			// Track as done so it doesn't reappear on refresh (GitHub API still
+			// returns it with all=true), including from a fetch already under way
 			m.sessionMarkedDone[msg.Id] = true
 			// Also remove from sessionMarkedRead
 			delete(m.sessionMarkedRead, msg.Id)
-			m.TotalCount = len(m.Notifications)
-			m.SetIsLoading(false)
-			m.Table.SetRows(m.BuildRows())
-			m.UpdateTotalItemsCount(m.TotalCount)
-			// If the removed item was the last one, move the current row to the new last item.
-			if m.TotalCount > 0 && m.CurrRow() >= m.TotalCount {
-				m.LastItem()
-			}
+			m.setNotifications(slices.DeleteFunc(
+				slices.Clone(m.Notifications),
+				func(n notificationrow.Data) bool { return n.GetId() == msg.Id },
+			))
+		}
+
+	case DoneStoreChangedMsg:
+		// Anything no longer marked done elsewhere may come back on the next fetch
+		for _, id := range msg.Undone {
+			delete(m.sessionMarkedDone, id)
+		}
+		doneStore := data.GetDoneStore()
+		kept := slices.DeleteFunc(slices.Clone(m.Notifications), func(n notificationrow.Data) bool {
+			return doneStore.IsDone(n.GetId(), n.Notification.UpdatedAt)
+		})
+		if len(kept) != len(m.Notifications) {
+			m.setNotifications(kept)
 		}
 
 	case UpdateNotificationReadStateMsg:
@@ -344,7 +359,7 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 				if !msg.Unread {
 					m.sessionMarkedRead[msg.Id] = true
 				}
-				m.Table.SetRows(m.BuildRows())
+				m.syncRow(i)
 				break
 			}
 		}
@@ -365,9 +380,18 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 					m.Notifications[i].GetSubjectType(),
 					msg.Actor,
 				)
-				m.Table.SetRows(m.BuildRows())
+				m.syncRow(i)
 				log.Debug("Updated notification", "id", msg.Id, "count",
 					msg.NewCommentsCount, "state", msg.SubjectState, "actor", msg.Actor)
+				break
+			}
+		}
+
+	case UpdateNotificationDraftMsg:
+		for i := range m.Notifications {
+			if m.Notifications[i].GetId() == msg.Id {
+				m.Notifications[i].HasDraft = msg.HasDraft
+				m.syncRow(i)
 				break
 			}
 		}
@@ -377,8 +401,8 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 		log.Debug("UpdateNotificationUrlMsg received", "id", msg.Id, "url", msg.ResolvedUrl)
 		for i := range m.Notifications {
 			if m.Notifications[i].GetId() == msg.Id {
+				// The resolved URL isn't displayed, so there's nothing to re-render
 				m.Notifications[i].ResolvedUrl = msg.ResolvedUrl
-				m.Table.SetRows(m.BuildRows())
 				log.Debug("Updated notification URL", "id", msg.Id, "url", msg.ResolvedUrl)
 				break
 			}
@@ -386,23 +410,40 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 
 	case SectionNotificationsFetchedMsg:
 		if m.LastFetch.TaskId == msg.TaskId {
+			// The fetch may have started before actions the user took since,
+			// e.g. marking a notification as done, so those win over it
+			fetched := m.applySessionActions(msg.Notifications)
+			var notifications []notificationrow.Data
 			if m.PageInfo != nil {
 				// Append to existing notifications (pagination)
-				m.Notifications = append(m.Notifications, msg.Notifications...)
+				notifications = append(slices.Clone(m.Notifications), fetched...)
 			} else {
 				// First page, replace
-				m.Notifications = msg.Notifications
+				notifications = carryOverFetchedDetails(m.Notifications, m.keepShown(fetched))
 			}
-			m.TotalCount = len(m.Notifications)
+			m.showingCached = false
 			m.PageInfo = &msg.PageInfo
 			m.SetIsLoading(false)
-			m.Table.SetRows(m.BuildRows())
+			// Stay on the same notification where it's shown, e.g. the one
+			// that's open, even if others came before it since the rows were
+			// last fetched
+			m.setNotifications(notifications)
 			m.UpdateLastUpdated(time.Now())
-			m.UpdateTotalItemsCount(m.TotalCount)
 
 			// Start background fetches for comment counts (only for new notifications)
-			fetchCmds := m.fetchCommentCountsForNotifications(msg.Notifications)
-			cmd = tea.Batch(fetchCmds...)
+			fetchCmds := m.fetchCommentCountsForNotifications(fetched)
+			cmd = batchNotificationUpdates(fetchCmds)
+		}
+
+	case SectionNotificationsFetchFailedMsg:
+		if m.LastFetch.TaskId == msg.TaskId {
+			// Rows shown from the cache stay, marked as such in the pager
+			m.SetIsLoading(false)
+		}
+
+	case spinner.TickMsg:
+		if m.isRefreshingCached() {
+			m.refreshSpinner, cmd = m.refreshSpinner.Update(msg)
 		}
 
 	case ClearAllNotificationsMsg:
@@ -410,6 +451,7 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 		m.Notifications = []notificationrow.Data{}
 		m.TotalCount = 0
 		m.PageInfo = nil
+		m.showingCached = false
 		m.sessionMarkedDone = make(map[string]bool)
 		cmds := make([]tea.Cmd, 0)
 		cmds = append(cmds, m.SetIsLoading(true))
@@ -426,6 +468,12 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 			m.sessionMarkedRead[m.Notifications[i].GetId()] = true
 		}
 		m.Table.SetRows(m.BuildRows())
+	}
+
+	switch msg.(type) {
+	case SectionNotificationsFetchedMsg, UpdateNotificationMsg, DoneStoreChangedMsg,
+		UpdateNotificationReadStateMsg, UpdateNotificationCommentsMsg, MarkAllAsReadMsg:
+		m.saveCachedRows()
 	}
 
 	search, searchCmd := m.SearchBar.Update(msg)
@@ -522,6 +570,17 @@ func (m Model) BuildRows() []table.Row {
 	return rows
 }
 
+// syncRow re-renders the table row for the notification at idx, leaving the
+// rest of the table untouched.
+func (m *Model) syncRow(idx int) {
+	if idx < 0 || idx >= len(m.Notifications) || idx >= len(m.Table.Rows) {
+		m.Table.SetRows(m.BuildRows())
+		return
+	}
+	notificationModel := notificationrow.Notification{Ctx: m.Ctx, Data: &m.Notifications[idx]}
+	m.Table.SetRow(idx, notificationModel.ToTableRow())
+}
+
 func (m *Model) NumRows() int {
 	return len(m.Notifications)
 }
@@ -540,6 +599,159 @@ func (m *Model) GetCurrNotification() *notificationrow.Data {
 		return nil
 	}
 	return &m.Notifications[idx]
+}
+
+// NotificationsNearCursor returns the notifications from before rows above
+// the current one to after rows below it, nearest first: the current one,
+// then those below it, then those above it.
+func (m *Model) NotificationsNearCursor(before, after int) []notificationrow.Data {
+	curr := m.Table.GetCurrItem()
+	if curr < 0 || curr >= len(m.Notifications) {
+		return nil
+	}
+	near := make([]notificationrow.Data, 0, before+after+1)
+	near = append(near, m.Notifications[curr:min(len(m.Notifications), curr+after+1)]...)
+	for i := curr - 1; i >= max(0, curr-before); i-- {
+		near = append(near, m.Notifications[i])
+	}
+	return near
+}
+
+// setNotifications replaces the rows, staying on the same notification and
+// keeping it where it's shown. If it's gone, the cursor moves to the nearest
+// one after it that's still there, or else before it.
+func (m *Model) setNotifications(notifications []notificationrow.Data) {
+	prev := m.Notifications
+	curr := m.Table.GetCurrItem()
+	m.Notifications = notifications
+	m.TotalCount = len(notifications)
+	m.Table.ReplaceRows(m.BuildRows(), m.nearestIndex(prev, curr))
+	m.UpdateTotalItemsCount(m.TotalCount)
+}
+
+// nearestIndex returns the index of prev[curr] in the current rows, or of the
+// nearest notification to it in prev that's still there.
+func (m *Model) nearestIndex(prev []notificationrow.Data, curr int) int {
+	if curr < 0 || curr >= len(prev) {
+		return curr
+	}
+	indexes := make(map[string]int, len(m.Notifications))
+	for i, n := range m.Notifications {
+		indexes[n.GetId()] = i
+	}
+	for i := curr; i < len(prev); i++ {
+		if idx, ok := indexes[prev[i].GetId()]; ok {
+			return idx
+		}
+	}
+	for i := curr - 1; i >= 0; i-- {
+		if idx, ok := indexes[prev[i].GetId()]; ok {
+			return idx
+		}
+	}
+	return curr
+}
+
+// applySessionActions applies what the user did this session to fetched
+// notifications, in case they were fetched before it took effect: ones
+// marked done are left out, and ones marked read are shown as read unless
+// they were updated since.
+func (m *Model) applySessionActions(fetched []notificationrow.Data) []notificationrow.Data {
+	doneStore := data.GetDoneStore()
+	fetched = slices.DeleteFunc(fetched, func(n notificationrow.Data) bool {
+		return m.sessionMarkedDone[n.GetId()] || doneStore.IsDone(n.GetId(), n.Notification.UpdatedAt)
+	})
+	shownUpdatedAt := make(map[string]time.Time, len(m.Notifications))
+	for _, n := range m.Notifications {
+		shownUpdatedAt[n.GetId()] = n.Notification.UpdatedAt
+	}
+	for i := range fetched {
+		n := &fetched[i].Notification
+		if updatedAt, ok := shownUpdatedAt[n.Id]; ok && m.sessionMarkedRead[n.Id] &&
+			!n.UpdatedAt.After(updatedAt) {
+			n.Unread = false
+		}
+	}
+	return fetched
+}
+
+// keepShown adds back shown notifications that the fetched ones lack but that
+// should stay: the current one, which may be open, and ones marked read this
+// session, which the fetch may have left out if it started before they were.
+// Ones marked done are still left out.
+func (m *Model) keepShown(fetched []notificationrow.Data) []notificationrow.Data {
+	fetchedIds := make(map[string]bool, len(fetched))
+	for _, n := range fetched {
+		fetchedIds[n.GetId()] = true
+	}
+	var currId string
+	if curr := m.GetCurrNotification(); curr != nil {
+		currId = curr.GetId()
+	}
+	doneStore := data.GetDoneStore()
+	for _, n := range m.Notifications {
+		id := n.GetId()
+		if fetchedIds[id] || (id != currId && !m.sessionMarkedRead[id]) ||
+			m.sessionMarkedDone[id] || doneStore.IsDone(id, n.Notification.UpdatedAt) {
+			continue
+		}
+		// Fetched notifications are the most recently updated first
+		i := slices.IndexFunc(fetched, func(f notificationrow.Data) bool {
+			return f.Notification.UpdatedAt.Before(n.Notification.UpdatedAt)
+		})
+		if i < 0 {
+			i = len(fetched)
+		}
+		fetched = slices.Insert(fetched, i, n)
+	}
+	return fetched
+}
+
+// carryOverFetchedDetails keeps what was fetched in the background for rows
+// that are refetched, e.g. comment counts, so they don't blank out until
+// they're fetched again. Details are kept only if the notification hasn't
+// been updated since.
+func carryOverFetchedDetails(prev, fetched []notificationrow.Data) []notificationrow.Data {
+	if len(prev) == 0 {
+		return fetched
+	}
+	byId := make(map[string]*notificationrow.Data, len(prev))
+	for i := range prev {
+		byId[prev[i].GetId()] = &prev[i]
+	}
+	for i := range fetched {
+		p, ok := byId[fetched[i].GetId()]
+		if !ok {
+			continue
+		}
+		fetched[i].HasDraft = p.HasDraft
+		if !p.Notification.UpdatedAt.Equal(fetched[i].Notification.UpdatedAt) {
+			continue
+		}
+		fetched[i].NewCommentsCount = p.NewCommentsCount
+		fetched[i].SubjectState = p.SubjectState
+		fetched[i].IsDraft = p.IsDraft
+		fetched[i].Actor = p.Actor
+		fetched[i].ActivityDescription = p.ActivityDescription
+		fetched[i].ResolvedUrl = p.ResolvedUrl
+	}
+	return fetched
+}
+
+// SetIsLoading shows the section as loading. While rows from the cache are
+// shown, they stay visible, and the pager shows they're being refreshed.
+func (m *Model) SetIsLoading(val bool) tea.Cmd {
+	if val && m.showingCached {
+		m.IsLoading = true
+		return m.refreshSpinner.Tick
+	}
+	return m.BaseModel.SetIsLoading(val)
+}
+
+// isRefreshingCached reports whether rows shown from the cache are being
+// refreshed.
+func (m *Model) isRefreshingCached() bool {
+	return m.showingCached && m.IsLoading
 }
 
 func (m *Model) FetchNextPageSectionRows() []tea.Cmd {
@@ -588,10 +800,11 @@ func (m *Model) FetchNextPageSectionRows() []tea.Cmd {
 	startCmd := m.Ctx.StartTask(task)
 	cmds = append(cmds, startCmd)
 
-	// Capture session state for the closure
-	sessionMarkedRead := m.sessionMarkedRead
+	// Capture session state for the closure. The maps are copied, as the
+	// section keeps changing them while the fetch runs.
+	sessionMarkedRead := maps.Clone(m.sessionMarkedRead)
 	hasSessionMarkedRead := len(sessionMarkedRead) > 0
-	sessionMarkedDone := m.sessionMarkedDone
+	sessionMarkedDone := maps.Clone(m.sessionMarkedDone)
 
 	// Capture current page info for pagination
 	pageInfo := m.PageInfo
@@ -644,6 +857,7 @@ func (m *Model) FetchNextPageSectionRows() []tea.Cmd {
 					SectionType: m.Type,
 					TaskId:      taskId,
 					Err:         err,
+					Msg:         SectionNotificationsFetchFailedMsg{TaskId: taskId},
 				}
 			}
 			lastPageInfo = res.PageInfo
@@ -810,6 +1024,7 @@ func (m *Model) UpdateLastUpdated(t time.Time) {
 
 func (m *Model) ResetRows() {
 	m.Notifications = nil
+	m.showingCached = false
 	// Clear session state on manual refresh - user explicitly wants fresh data
 	m.sessionMarkedRead = make(map[string]bool)
 	m.sessionMarkedDone = make(map[string]bool)
@@ -819,12 +1034,14 @@ func (m *Model) ResetRows() {
 func InitSections(ctx *context.ProgramContext) []section.Section {
 	sections := make([]section.Section, len(ctx.Config.NotificationsSections))
 	for i, sectionConfig := range ctx.Config.NotificationsSections {
-		sections[i] = new(NewModel(
+		m := new(NewModel(
 			i,
 			ctx,
 			sectionConfig,
 			time.Now(),
 		))
+		m.loadCachedRows()
+		sections[i] = m
 	}
 
 	return sections
@@ -857,6 +1074,19 @@ type SectionNotificationsFetchedMsg struct {
 	PageInfo      data.PageInfo
 }
 
+// SectionNotificationsFetchFailedMsg is sent when fetching notifications
+// failed, so the section stops showing it's loading.
+type SectionNotificationsFetchFailedMsg struct {
+	TaskId string
+}
+
+// DoneStoreChangedMsg signals that the done store file was changed by another
+// process. Rows it now marks as done are hidden; Undone holds IDs that may need
+// to resurface, which requires a refetch.
+type DoneStoreChangedMsg struct {
+	Undone []string
+}
+
 // UpdateNotificationMsg signals that a notification's state has changed.
 // If IsRemoved is true, the notification should be removed from the list (marked as done).
 type UpdateNotificationMsg struct {
@@ -872,6 +1102,13 @@ type UpdateNotificationCommentsMsg struct {
 	SubjectState     string // OPEN, CLOSED, MERGED
 	IsDraft          bool
 	Actor            string // Username who triggered the notification
+}
+
+// UpdateNotificationDraftMsg marks whether a notification has an unsent
+// comment draft.
+type UpdateNotificationDraftMsg struct {
+	Id       string
+	HasDraft bool
 }
 
 // UpdateNotificationUrlMsg carries a resolved URL for notifications where the URL
@@ -896,10 +1133,17 @@ func (m Model) GetTotalCount() int {
 func (m Model) GetPagerContent() string {
 	pagerContent := ""
 	if m.TotalCount > 0 {
+		// Rows shown from the cache are from when they were last fetched
+		updated := fmt.Sprintf("%v %v", constants.WaitingIcon, m.LastUpdated().Format("01/02 15:04:05"))
+		if m.isRefreshingCached() {
+			updated = fmt.Sprintf("%vRefreshing… • cached %v", m.refreshSpinner.View(),
+				m.LastUpdated().Format("01/02 15:04:05"))
+		} else if m.showingCached {
+			updated += " (cached)"
+		}
 		pagerContent = fmt.Sprintf(
-			"%v %v • %v %v/%v",
-			constants.WaitingIcon,
-			m.LastUpdated().Format("01/02 15:04:05"),
+			"%v • %v %v/%v",
+			updated,
 			m.SingularForm,
 			m.Table.GetCurrItem()+1,
 			m.TotalCount,
@@ -935,6 +1179,7 @@ func (m *Model) fetchCommentCountsForNotifications(notifications []notificationr
 		subjectType := notif.GetSubjectType()
 		subjectUrl := notif.GetUrl()
 		lastReadAt := notif.Notification.LastReadAt
+		updatedAt := notif.Notification.UpdatedAt
 		apiUrl := notif.Notification.Subject.Url
 
 		log.Debug(
@@ -958,11 +1203,13 @@ func (m *Model) fetchCommentCountsForNotifications(notifications []notificationr
 			id, url, readAt, commentUrl := notifId, subjectUrl, lastReadAt, latestCommentUrl
 			cmds = append(cmds, func() tea.Msg {
 				log.Debug("Fetching PR for comment count", "url", url)
-				pr, err := data.FetchPullRequest(url)
+				// Through the subject cache, so the PR is ready when opened
+				subject, err := data.GetSubjectCache().FetchPR(url, updatedAt, data.SubjectMaxAge)
 				if err != nil {
 					log.Error("Failed to fetch PR for comment count", "url", url, "err", err)
 					return nil
 				}
+				pr := *subject.PR
 				count := countNewPRComments(pr, readAt)
 				actor, _ := data.FetchCommentAuthor(commentUrl)
 				if actor == "" {
@@ -992,11 +1239,13 @@ func (m *Model) fetchCommentCountsForNotifications(notifications []notificationr
 			id, url, readAt, commentUrl := notifId, subjectUrl, lastReadAt, latestCommentUrl
 			cmds = append(cmds, func() tea.Msg {
 				log.Debug("Fetching Issue for comment count", "url", url)
-				issue, err := data.FetchIssue(url)
+				// Through the subject cache, so the Issue is ready when opened
+				subject, err := data.GetSubjectCache().FetchIssue(url, updatedAt, data.SubjectMaxAge)
 				if err != nil {
 					log.Error("Failed to fetch Issue for comment count", "url", url, "err", err)
 					return nil
 				}
+				issue := *subject.Issue
 				count := countNewIssueComments(issue, readAt)
 				actor, _ := data.FetchCommentAuthor(commentUrl)
 				if actor == "" {

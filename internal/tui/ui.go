@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +20,8 @@ import (
 	"charm.land/lipgloss/v2/compat"
 	log "charm.land/log/v2"
 	"github.com/atotto/clipboard"
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/cli/go-gh/v2/pkg/browser"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	zone "github.com/lrstanley/bubblezone/v2"
@@ -69,6 +73,31 @@ type Model struct {
 	tasks            map[string]context.Task
 	positionOverride string // "" means no override, "right" or "bottom"
 	mode             Mode
+
+	// sidebarComments are the comments shown in the sidebar, in the order
+	// the sidebar's anchors are in
+	sidebarComments []common.CommentAnchor
+
+	// drafts are unsent comments kept for notifications that were left
+	// while writing them, by notification id
+	drafts map[string]string
+	// confirmingDraftDiscard is whether discarding a draft awaits a y/n
+	confirmingDraftDiscard bool
+
+	// watchingDoneStore is set once the done store is being watched for
+	// outside changes.
+	watchingDoneStore bool
+	// commentWatch waits for a reply to the last comment posted
+	commentWatch *commentWatch
+
+	// prefetching holds the URLs of the notification subjects being fetched
+	// ahead of being opened, and prefetchFailed when fetching them last
+	// failed, to hold off retrying.
+	prefetching    map[string]bool
+	prefetchFailed map[string]time.Time
+	// prerendered holds the notification subjects whose markdown has been
+	// rendered ahead of being opened
+	prerendered map[prerenderKey]bool
 }
 
 type Mode int
@@ -184,7 +213,15 @@ func (m *Model) initScreen() tea.Msg {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestBackgroundColor, m.initScreen)
+	return tea.Batch(
+		tea.RequestBackgroundColor,
+		// Ask the terminal to notify us when its color scheme changes, so
+		// we can switch between light and dark styles live.
+		tea.Raw(ansi.SetModeLightDark),
+		// Check whether the terminal supports that; if not, we poll instead.
+		tea.Raw(ansi.RequestModeLightDark),
+		m.initScreen,
+	)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -223,6 +260,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		if m.sidebar.IsSearching() {
+			cmd = m.sidebar.UpdateSearch(msg)
+			m.syncFocusedCommit(false)
+			return m, cmd
+		}
+
 		if m.footer.ShowConfirmQuit && (msg.String() == "y" || msg.String() == "enter") {
 			return m, tea.Quit
 		} else if m.footer.ShowConfirmQuit {
@@ -238,6 +281,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if action != "" {
 				return m, m.executeNotificationAction(action)
 			}
+			return m, nil
+		}
+
+		// Confirm discarding a detached comment draft
+		if m.confirmingDraftDiscard {
+			m.confirmingDraftDiscard = false
+			if msg.String() == "y" || msg.String() == "Y" {
+				m.discardDraft()
+			} else {
+				m.syncSidebar()
+			}
+			return m, nil
+		}
+
+		// While the help is open, q and esc close it instead of quitting or
+		// going back. Ctrl+c still quits.
+		if m.footer.ShowAll && msg.String() != "ctrl+c" &&
+			(key.Matches(msg, m.keys.Quit) || msg.String() == "esc") {
+			m.footer.ShowAll = false
+			m.syncMainContentDimensions()
 			return m, nil
 		}
 
@@ -261,11 +324,73 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.SectionMode):
 			m.mode = ModeSection
 
+		// With a notification's PR/Issue open, search its comments rather
+		// than the notifications
+		case key.Matches(msg, m.keys.Search) && m.isNotificationSubjectShown():
+			return m, m.sidebar.StartSearch()
+
+		case m.isNotificationSubjectShown() && m.sidebar.HasSearch() &&
+			(key.Matches(msg, keys.NotificationKeys.NextMatch) ||
+				key.Matches(msg, keys.NotificationKeys.PrevMatch)):
+			if key.Matches(msg, keys.NotificationKeys.NextMatch) {
+				m.sidebar.SearchNext()
+			} else {
+				m.sidebar.SearchPrev()
+			}
+			m.syncFocusedCommit(false)
+			return m, nil
+
+		// Esc drops the search before going back to the notification
+		case m.isNotificationSubjectShown() && m.sidebar.HasSearch() &&
+			key.Matches(msg, keys.NotificationKeys.BackToNotification):
+			m.sidebar.ClearSearch()
+			return m, nil
+
+		// With a notification's PR/Issue open, refresh it rather than the
+		// notifications, e.g. to see new comments
+		case key.Matches(msg, m.keys.Refresh) && m.isNotificationSubjectShown():
+			return m, m.refreshNotificationSubject()
+
+		// With a comment focused in an open notification, reply to it
+		case key.Matches(msg, keys.NotificationKeys.ReplyToComment) && m.hasFocusedComment():
+			return m, m.replyToFocusedComment()
+
+		// With a commit focused in an open notification's PR, show its files
+		case key.Matches(msg, keys.NotificationKeys.ViewCommitFiles) && m.hasFocusedCommit():
+			return m, m.viewFocusedCommitFiles()
+
+		// With a check focused in an open notification's PR, open it
+		case key.Matches(msg, keys.NotificationKeys.OpenCheck) && m.hasFocusedCheck():
+			return m, m.openFocusedCheck()
+
+		case key.Matches(msg, keys.NotificationKeys.ContinueDraft) && m.hasDetachedDraft():
+			return m, m.continueDraft()
+
+		case key.Matches(msg, keys.NotificationKeys.DiscardDraft) && m.hasDetachedDraft():
+			m.confirmingDraftDiscard = true
+			m.syncSidebar()
+			return m, nil
+
+		// With a notification's PR open, h/l switch its tabs rather than moving
+		// to another section, which would close it
+		case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+			(key.Matches(msg, m.keys.PrevSection) || key.Matches(msg, m.keys.NextSection)):
+			if key.Matches(msg, m.keys.PrevSection) {
+				if m.prView.IsFirstTab() {
+					// There's nothing further left, so go back to the list
+					return m, m.backToNotification()
+				}
+				m.prView.PrevTab()
+			} else {
+				m.prView.NextTab()
+			}
+			m.syncSidebar()
+
 		case key.Matches(msg, m.keys.PrevSection):
 			prevSection := m.getSectionAt(m.getPrevSectionId())
 			if prevSection != nil {
 				m.setCurrSectionId(prevSection.GetId())
-				cmd = m.onViewedRowChanged()
+				cmd = tea.Batch(m.onViewedRowChanged(), m.resumeLoadingSpinner())
 			}
 
 		case key.Matches(msg, m.keys.NextSection):
@@ -273,8 +398,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			nextSection := m.getSectionAt(nextSectionId)
 			if nextSection != nil {
 				m.setCurrSectionId(nextSection.GetId())
-				cmd = m.onViewedRowChanged()
+				cmd = tea.Batch(m.onViewedRowChanged(), m.resumeLoadingSpinner())
 			}
+
+		// With a notification's PR/Issue open, navigation keys scroll within it
+		// rather than moving to another notification, which would close it.
+		// Esc goes back to the notification list.
+		case m.isNotificationOpen() && (key.Matches(msg, m.keys.Down) ||
+			key.Matches(msg, m.keys.Up) || key.Matches(msg, m.keys.FirstLine) ||
+			key.Matches(msg, m.keys.LastLine)):
+			// Move between comments where there are any, else scroll by lines
+			switch {
+			case key.Matches(msg, m.keys.Down):
+				if !m.sidebar.FocusNext() {
+					m.sidebar.ScrollDown(previewScrollLines)
+				}
+			case key.Matches(msg, m.keys.Up):
+				if !m.sidebar.FocusPrev() {
+					m.sidebar.ScrollUp(previewScrollLines)
+				}
+			case key.Matches(msg, m.keys.FirstLine):
+				m.sidebar.ScrollToTop()
+				m.sidebar.ResetFocus()
+				// So the first commit is focused, rather than the last one
+				m.prView.SetFocusedCommit(-1)
+				m.prView.SetFocusedCheck(-1)
+			case key.Matches(msg, m.keys.LastLine):
+				m.sidebar.ScrollToBottom()
+				m.sidebar.FocusLast()
+			}
+			m.syncFocusedCommit(key.Matches(msg, m.keys.Up))
 
 		case key.Matches(msg, m.keys.Down):
 			if currSection != nil {
@@ -385,6 +538,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, cmd
 
+		// With a notification's PR/Issue open, q closes it rather than
+		// quitting. Ctrl+c still quits.
+		case key.Matches(msg, m.keys.Quit) && msg.String() != "ctrl+c" && m.isNotificationOpen():
+			return m, m.backToNotification()
+
 		case key.Matches(msg, m.keys.Quit):
 			if !m.ctx.Config.ConfirmQuit {
 				return m, tea.Quit
@@ -448,7 +606,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.openSidebarForPRInput(m.prView.SetIsLabeling)
 
 			case key.Matches(msg, keys.PRKeys.Comment):
-				return m, m.openSidebarForPRInput(m.prView.SetIsCommenting)
+				return m, m.openSidebarForPRComment()
 
 			case key.Matches(msg, keys.PRKeys.Close):
 				if currRowData != nil {
@@ -509,7 +667,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.openSidebarForInput(m.issueSidebar.SetIsUnassigning)
 
 			case key.Matches(msg, keys.IssueKeys.Comment):
-				return m, m.openSidebarForInput(m.issueSidebar.SetIsCommenting)
+				return m, m.openSidebarForIssueComment()
 
 			case key.Matches(msg, keys.IssueKeys.Checkout):
 				cmd, err := m.issueSidebar.Checkout()
@@ -534,6 +692,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.switchSelectedView())
 			}
 		case m.ctx.View == config.NotificationsView:
+			m.dropStaleNotificationSubject()
 			switch {
 			case key.Matches(msg, m.keys.OpenGithub):
 				cmds = append(cmds, m.openBrowser())
@@ -547,6 +706,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Return from PR/Issue detail back to the default notification prompt
 			case key.Matches(msg, keys.NotificationKeys.BackToNotification):
 				return m, m.backToNotification()
+
+			// Scrolling the preview only moves the sidebar's viewport (below), so
+			// skip the subject handlers, which re-render the whole preview
+			case (m.notificationView.GetSubjectPR() != nil ||
+				m.notificationView.GetSubjectIssue() != nil) &&
+				(key.Matches(msg, m.keys.PageDown) || key.Matches(msg, m.keys.PageUp)):
 
 			// PR keybindings when viewing a PR notification
 			case m.notificationView.GetSubjectPR() != nil:
@@ -568,7 +733,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, m.openSidebarForPRInput(m.prView.SetIsLabeling)
 
 						case prview.PRActionComment:
-							return m, m.openSidebarForPRInput(m.prView.SetIsCommenting)
+							return m, m.openSidebarForPRComment()
 
 						case prview.PRActionDiff:
 							if pr := m.notificationView.GetSubjectPR(); pr != nil {
@@ -579,8 +744,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 						case prview.PRActionCheckout:
 							if pr := m.notificationView.GetSubjectPR(); pr != nil {
-								cmd, _ = notificationssection.CheckoutPR(
+								var err error
+								cmd, err = notificationssection.CheckoutPR(
 									m.ctx, pr.GetNumber(), pr.GetRepoNameWithOwner())
+								if err != nil {
+									m.ctx.Error = err
+								}
 							}
 							return m, cmd
 
@@ -645,7 +814,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, m.openSidebarForInput(m.issueSidebar.SetIsUnassigning)
 
 					case issueview.IssueActionComment:
-						return m, m.openSidebarForInput(m.issueSidebar.SetIsCommenting)
+						return m, m.openSidebarForIssueComment()
 
 					case issueview.IssueActionCheckout:
 						cmd, err := m.issueSidebar.Checkout()
@@ -728,11 +897,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		cmds = append(cmds, fetchSectionsCmds, m.tabs.Init(), fetchUser,
 			m.doRefreshAtInterval(), m.doUpdateFooterAtInterval())
+		if !m.watchingDoneStore {
+			if err := data.GetDoneStore().Watch(); err != nil {
+				log.Error("Failed to watch done notifications store", "err", err)
+			} else {
+				m.watchingDoneStore = true
+				cmds = append(cmds, waitForDoneStoreChange)
+			}
+		}
+
+	case commentWatchTickMsg, commentWatchCheckedMsg:
+		cmds = append(cmds, m.updateCommentWatch(msg))
+
+	case commentReplyMsg:
+		m.applyCommentReply(msg)
+		cmds = append(cmds, m.syncSidebar())
+		m.scrollToLatestComment(msg.url)
 
 	case intervalRefresh:
 		fetchSectionsCmds := m.fetchAllViewSections()
 		m.updateTabs()
 		cmds = append(cmds, fetchSectionsCmds, m.doRefreshAtInterval())
+
+	case prview.CommitFilesMsg:
+		if msg.Err != nil {
+			log.Error("failed fetching commit files", "oid", msg.Oid, "err", msg.Err)
+		}
+		m.prView.SetCommitFiles(msg)
+		m.syncSidebar()
 
 	case userFetchedMsg:
 		m.ctx.User = msg.user
@@ -756,12 +948,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			cmds = append(cmds, clear)
 
+			m.settlePendingComment(msg.Msg)
+			m.syncPostingStatus()
 			scmd := m.updateSection(msg.SectionId, msg.SectionType, msg.Msg)
 			cmds = append(cmds, scmd)
+			m.updateNotificationSubject(msg.Msg)
+			if msg.Err == nil {
+				cmds = append(cmds, m.watchForReply(msg.Msg))
+			}
 
 			syncCmd := m.syncSidebar()
 			cmds = append(cmds, syncCmd)
+			// The open notification may no longer be the current one
+			cmds = append(cmds, m.syncPreviewFullscreen())
 		}
+
+	case constants.TaskStartedMsg:
+		cmds = append(cmds, m.updateSection(msg.SectionId, msg.SectionType, msg.Msg))
+		m.updateNotificationSubject(msg.Msg)
+		cmds = append(cmds, m.syncSidebar(), m.syncPreviewFullscreen())
+		// So the comment being posted is seen
+		switch update := msg.Msg.(type) {
+		case tasks.UpdatePRMsg:
+			if update.NewComment != nil && update.CommentedOn != nil {
+				m.scrollToLatestComment(update.CommentedOn.GetUrl())
+			}
+		case tasks.UpdateIssueMsg:
+			if update.NewComment != nil && update.CommentedOn != nil {
+				m.scrollToLatestComment(update.CommentedOn.GetUrl())
+			}
+		}
+		m.syncPostingStatus()
 
 	case prview.EnrichedPrMsg:
 		if msg.Err == nil {
@@ -774,56 +991,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case notificationPRFetchedMsg:
+		m.stopNotificationLoading(msg.NotificationId)
 		if msg.Err == nil {
-			// Convert enriched PR to prrow.Data for display
-			prData := msg.PR.ToPullRequestData()
-			m.notificationView.SetSubjectPR(&prrow.Data{
-				Primary:    &prData,
-				Enriched:   msg.PR,
-				IsEnriched: true,
-			}, msg.NotificationId)
-			keys.SetNotificationSubject(keys.NotificationSubjectPR)
-			// Update sidebar with PR view
-			width := m.sidebar.GetSidebarContentWidth()
-			m.prView.SetSectionId(0)
-			m.prView.SetRow(m.notificationView.GetSubjectPR())
-			m.prView.SetWidth(width)
-			m.prView.SetEnrichedPR(msg.PR)
-			// Switch to Activity tab and scroll to bottom if there's a latest comment
-			// (indicates there's new activity to show)
-			if msg.LatestCommentUrl != "" {
-				m.prView.GoToActivityTab()
-				m.sidebar.SetContent(m.prView.View())
-				m.sidebar.ScrollToBottom()
-			} else {
-				// For notifications without comments (new PRs, state changes, etc.)
-				// show the Overview tab without scrolling
-				m.prView.GoToFirstTab()
-				m.sidebar.SetContent(m.prView.View())
-			}
-			m.markNotificationAsRead(msg.NotificationId)
+			m.showNotificationPR(msg.NotificationId, msg.PR, msg.LatestCommentUrl)
 		} else {
 			log.Error("failed fetching notification PR", "err", msg.Err)
+			m.ctx.Error = msg.Err
 		}
 
 	case notificationIssueFetchedMsg:
+		m.stopNotificationLoading(msg.NotificationId)
 		if msg.Err == nil {
-			m.notificationView.SetSubjectIssue(&msg.Issue, msg.NotificationId)
-			keys.SetNotificationSubject(keys.NotificationSubjectIssue)
-			// Update sidebar with Issue view
-			width := m.sidebar.GetSidebarContentWidth()
-			m.issueSidebar.SetSectionId(0)
-			m.issueSidebar.SetRow(m.notificationView.GetSubjectIssue())
-			m.issueSidebar.SetWidth(width)
-			m.sidebar.SetContent(m.issueSidebar.View())
-			// Scroll to bottom if there's a latest comment (indicates new activity)
-			if msg.LatestCommentUrl != "" {
-				m.sidebar.ScrollToBottom()
-			}
-			m.markNotificationAsRead(msg.NotificationId)
+			m.showNotificationIssue(msg.NotificationId, msg.Issue, msg.LatestCommentUrl)
 		} else {
 			log.Error("failed fetching notification Issue", "err", msg.Err)
+			m.ctx.Error = msg.Err
 		}
+
+	case notificationSubjectFetchedMsg:
+		cmds = append(cmds, m.onNotificationSubjectFetched(msg))
+
+	case notificationssection.DoneStoreChangedMsg:
+		cmds = append(cmds, m.updateNotificationSections(msg))
+		if len(msg.Undone) > 0 && len(m.notifications) > 0 {
+			cmds = append(cmds, notificationssection.FetchAllSections(m.ctx, m.notifications))
+		}
+		cmds = append(cmds, m.syncSidebar(), waitForDoneStoreChange)
 
 	case notificationssection.UpdateNotificationReadStateMsg:
 		m.updateNotificationSections(msg)
@@ -831,10 +1024,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case notificationssection.UpdateNotificationCommentsMsg:
 		cmds = append(cmds, m.updateNotificationSections(msg))
 
+	case notificationssection.NotificationUpdatesBatchMsg:
+		for _, update := range msg.Updates {
+			cmds = append(cmds, m.updateNotificationSections(update))
+		}
+		// Wait for the next batch once here, not once per section
+		cmds = append(cmds, msg.Next())
+
 	case spinner.TickMsg:
+		if m.notificationView.IsLoading() {
+			cmds = append(cmds, m.notificationView.UpdateLoadingSpinner(msg))
+			if m.isNotificationLoadingShown() {
+				m.sidebar.SetContent(m.notificationView.View())
+			}
+		}
 		if len(m.tasks) > 0 {
 			taskSpinner, internalTickCmd := m.taskSpinner.Update(msg)
 			m.taskSpinner = taskSpinner
+			m.syncPostingStatus()
 			rTask := m.renderRunningTask()
 			m.footer.SetRightSection(rTask)
 			cmd = internalTickCmd
@@ -855,6 +1062,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if currSection != nil {
 			cmds = append(cmds, currSection.FetchNextPageSectionRows()...)
 		}
+		// The color scheme may have changed while we weren't looking
+		cmds = append(cmds, tea.RequestBackgroundColor)
+
+	case tea.MouseWheelMsg:
+		cmds = append(cmds, m.onMouseWheel(msg))
 
 	case tea.MouseClickMsg:
 		if msg.Button != tea.MouseLeft {
@@ -875,21 +1087,51 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return nil
 			}
 			cmds = append(cmds, openCmd)
+		} else {
+			cmds = append(cmds, m.onMouseClick(msg))
 		}
 
 	case tea.WindowSizeMsg:
 		m.onWindowSizeChanged(msg)
 
+	case tea.ModeReportMsg:
+		log.Debug("Mode report", "mode", msg.Mode, "value", msg.Value)
+		if msg.Mode == ansi.ModeLightDark && msg.Value.IsNotRecognized() {
+			log.Debug("Terminal doesn't report color scheme changes, polling background color")
+			cmds = append(cmds, pollBackgroundColor())
+		}
+
+	case pollBackgroundColorMsg:
+		cmds = append(cmds, tea.RequestBackgroundColor, pollBackgroundColor())
+
+	case uv.DarkColorSchemeEvent, uv.LightColorSchemeEvent:
+		// The terminal's color scheme changed; re-query the actual background
+		// color and let the BackgroundColorMsg handler restyle everything.
+		cmds = append(cmds, tea.RequestBackgroundColor)
+
 	case tea.BackgroundColorMsg:
-		log.Debugf("Setting markdownStyle in BackgroundColorMsg")
+		if m.ctx.BackgroundSource == "bubbletea" &&
+			m.ctx.HasDarkBackground == msg.IsDark() {
+			// Most likely a poll that found nothing changed
+			break
+		}
+		log.Debugf("Setting markdownStyle in BackgroundColorMsg %s", msg.String())
 		m.ctx.HasDarkBackground = msg.IsDark()
 		m.ctx.BackgroundSource = "bubbletea"
+		// Adaptive colors read this global at render time.
+		compat.HasDarkBackground = m.ctx.HasDarkBackground
 		log.Debugf(
 			"HasDarkBackground: %t, BackgroundSource: %s",
 			m.ctx.HasDarkBackground,
 			m.ctx.BackgroundSource,
 		)
 		markdown.InitializeMarkdownStyle(m.ctx)
+		if m.ctx.Config != nil {
+			// Some styles are rendered to strings up front, e.g. glyphs
+			m.ctx.Styles = context.InitStyles(m.ctx.Theme)
+			m.rebuildAllSectionRows()
+			cmds = append(cmds, m.syncSidebar())
+		}
 
 	case updateFooterMsg:
 		cmds = append(cmds, cmd, m.doUpdateFooterAtInterval())
@@ -898,6 +1140,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ctx.Error = msg.Err
 	}
 
+	cmds = append(cmds, m.syncPreviewFullscreen(), m.prefetchNotificationSubjects())
 	m.syncProgramContext()
 
 	var bsCmd tea.Cmd
@@ -966,9 +1209,12 @@ func (m *Model) View() tea.View {
 		s.WriteString(m.tabs.View())
 	}
 	s.WriteString("\n")
+	m.updateSidebarHints()
 	var content string
 	currSection := m.getCurrSection()
-	if currSection != nil {
+	if m.ctx.PreviewFullscreen {
+		content = m.sidebar.View()
+	} else if currSection != nil {
 		if m.ctx.PreviewPosition == "bottom" && m.sidebar.IsOpen {
 			content = lipgloss.JoinVertical(
 				lipgloss.Left,
@@ -1008,8 +1254,9 @@ func (m *Model) View() tea.View {
 		s.WriteString(m.footer.View())
 	}
 
+	base := zone.Scan(s.String())
 	layers := []*lipgloss.Layer{
-		lipgloss.NewLayer(zone.Scan(s.String())),
+		lipgloss.NewLayer(base),
 	}
 
 	if currSection != nil {
@@ -1033,6 +1280,13 @@ func (m *Model) View() tea.View {
 		layers = append(layers, lipgloss.NewLayer(issueCmp).X(previewPos.X+3).Y(y))
 	}
 
+	// Compositing re-parses the whole screen, so only pay for it when there
+	// are popups to overlay on top of the base layer.
+	if len(layers) == 1 {
+		v.SetContent(base)
+		return v
+	}
+
 	comp := lipgloss.NewCompositor(layers...)
 	v.SetContent(comp.Render())
 
@@ -1052,11 +1306,64 @@ type notificationPRFetchedMsg struct {
 	Err              error
 }
 
+// notificationSubjectRefreshedMsg carries a refetched PR or Issue of an open
+// notification
+type notificationSubjectRefreshedMsg struct {
+	NotificationId string
+	PR             *data.EnrichedPullRequestData
+	Issue          *data.IssueData
+}
+
 type notificationIssueFetchedMsg struct {
 	NotificationId   string
 	Issue            data.IssueData
 	LatestCommentUrl string
 	Err              error
+}
+
+// notificationSubjectFetchedMsg signals that a notification's PR or Issue,
+// fetched ahead of being opened or while it's being opened, is in the
+// subject cache, unless fetching it failed.
+type notificationSubjectFetchedMsg struct {
+	NotificationId   string
+	Url              string
+	LatestCommentUrl string
+	Err              error
+}
+
+// stopNotificationLoading stops the notification view's loading spinner once
+// the subject it was loading has arrived. The sidebar is re-rendered so it no
+// longer shows the spinner, e.g. when fetching failed.
+func (m *Model) stopNotificationLoading(notificationId string) {
+	if m.notificationView.GetLoadingId() != notificationId {
+		return
+	}
+	shown := m.isNotificationLoadingShown()
+	m.notificationView.StopLoading()
+	if shown {
+		m.sidebar.SetContent(m.notificationView.View())
+	}
+}
+
+// isNotificationLoadingShown reports whether the sidebar is showing the
+// notification whose subject is being loaded.
+func (m *Model) isNotificationLoadingShown() bool {
+	if !m.sidebar.IsOpen || m.ctx.View != config.NotificationsView {
+		return false
+	}
+	row, ok := m.getCurrRowData().(*notificationrow.Data)
+	return ok && row != nil && row.GetId() == m.notificationView.GetLoadingId()
+}
+
+// resumeLoadingSpinner restarts the current section's loading spinner if it's
+// still loading. Spinner ticks only go to the current section, so a section
+// that was loading in the background has a stopped spinner.
+func (m *Model) resumeLoadingSpinner() tea.Cmd {
+	currSection := m.getCurrSection()
+	if currSection == nil || !currSection.GetIsLoading() {
+		return nil
+	}
+	return currSection.SetIsLoading(true)
 }
 
 func (m *Model) setCurrSectionId(newSectionId int) {
@@ -1090,9 +1397,12 @@ func (m *Model) onViewedRowChanged() tea.Cmd {
 	sidebarCmd := m.syncSidebar()
 	enrichCmd := m.prView.EnrichCurrRow()
 	m.sidebar.ScrollToTop()
+	m.stashDraft()
 	m.notificationView.ResetSubject()
 	keys.SetNotificationSubject(keys.NotificationSubjectNone)
-	return tea.Batch(sidebarCmd, enrichCmd)
+	// Moving through the notifications is a sign the next ones are about to
+	// be opened
+	return tea.Batch(sidebarCmd, enrichCmd, m.prefetchNotificationSubjects())
 }
 
 func (m *Model) onWindowSizeChanged(msg tea.WindowSizeMsg) {
@@ -1205,6 +1515,7 @@ func (m *Model) getBaseContentHeight() int {
 
 func (m *Model) syncMainContentDimensions() {
 	m.ctx.PreviewPosition = m.resolvePreviewPosition()
+	m.ctx.PreviewFullscreen = false
 
 	if !m.sidebar.IsOpen {
 		m.ctx.MainContentWidth = m.ctx.ScreenWidth
@@ -1241,6 +1552,29 @@ func (m *Model) syncMainContentDimensions() {
 		m.ctx.MainContentWidth = m.ctx.ScreenWidth - m.ctx.DynamicPreviewWidth
 		m.ctx.DynamicPreviewHeight = 0
 	}
+
+	// A notification's PR or Issue gets the whole screen - the notifications
+	// list isn't useful while reading it, or waiting for it to load. The
+	// section keeps its dimensions so going back to it doesn't need a
+	// relayout.
+	if m.isNotificationOpen() {
+		m.ctx.PreviewFullscreen = true
+		m.ctx.PreviewPosition = "right"
+		m.ctx.MainContentHeight = m.getBaseContentHeight()
+		m.ctx.DynamicPreviewWidth = m.ctx.ScreenWidth
+		m.ctx.DynamicPreviewHeight = 0
+	}
+}
+
+// syncPreviewFullscreen re-lays out the screen when a notification's subject
+// was opened or closed since the dimensions were last synced.
+func (m *Model) syncPreviewFullscreen() tea.Cmd {
+	if m.ctx.Config == nil || m.ctx.PreviewFullscreen == m.isNotificationOpen() {
+		return nil
+	}
+	m.syncMainContentDimensions()
+	m.syncProgramContext()
+	return m.syncSidebar()
 }
 
 func (m *Model) openSidebarForPRInput(setFunc func(bool) tea.Cmd) tea.Cmd {
@@ -1248,23 +1582,116 @@ func (m *Model) openSidebarForPRInput(setFunc func(bool) tea.Cmd) tea.Cmd {
 	return m.openSidebarForInput(setFunc)
 }
 
+// openSidebarForPRComment opens the comment editor below the PR's activity,
+// scrolled to the latest comments, or continues a detached draft.
+func (m *Model) openSidebarForPRComment() tea.Cmd {
+	if m.hasDetachedDraft() {
+		return m.continueDraft()
+	}
+	m.prView.GoToActivityTab()
+	cmd := m.openSidebarForInput(func(bool) tea.Cmd {
+		return m.prView.StartComment("", m.isNotificationSubjectShown())
+	})
+	m.sidebar.ScrollToBottom()
+	return cmd
+}
+
+// openSidebarForIssueComment opens the comment editor below the issue's
+// comments, or continues a detached draft.
+func (m *Model) openSidebarForIssueComment() tea.Cmd {
+	if m.hasDetachedDraft() {
+		return m.continueDraft()
+	}
+	cmd := m.openSidebarForInput(func(bool) tea.Cmd {
+		return m.issueSidebar.StartComment("", m.isNotificationSubjectShown())
+	})
+	m.sidebar.ScrollToBottom()
+	return cmd
+}
+
 func (m *Model) openSidebarForInput(setFunc func(bool) tea.Cmd) tea.Cmd {
 	m.sidebar.IsOpen = true
 	cmd := setFunc(true)
 	m.syncMainContentDimensions()
 	m.syncSidebar()
-	m.sidebar.ScrollToBottom()
 	return cmd
 }
 
+// updateSidebarHints sets the key hints the sidebar shows for moving around
+// and acting on what's focused in it.
+func (m *Model) updateSidebarHints() {
+	m.sidebar.SetNavKeysScroll(m.isNotificationSubjectShown())
+	switch {
+	case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+		m.prView.IsCommitsTab():
+		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ViewCommitFiles) + " files")
+		m.sidebar.SetFocusLabel("commit")
+	case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+		m.prView.IsChecksTab():
+		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.OpenCheck) + " open")
+		m.sidebar.SetFocusLabel("check")
+	case m.isNotificationSubjectShown():
+		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ReplyToComment) + " reply")
+		m.sidebar.SetFocusLabel("comment")
+	default:
+		m.sidebar.SetFocusHint("")
+		m.sidebar.SetFocusLabel("")
+	}
+}
+
+// previewScrollLines is how far the navigation keys scroll an open
+// notification's preview.
+const previewScrollLines = 3
+
+// isNotificationSubjectShown reports whether a notification's PR or Issue is
+// open in the preview.
+func (m *Model) isNotificationSubjectShown() bool {
+	return m.ctx.View == config.NotificationsView && m.sidebar.IsOpen &&
+		(m.notificationView.GetSubjectPR() != nil || m.notificationView.GetSubjectIssue() != nil)
+}
+
+// isNotificationOpen reports whether a notification's PR or Issue is open in
+// the preview, or being loaded to be.
+func (m *Model) isNotificationOpen() bool {
+	return m.isNotificationSubjectShown() || m.isNotificationLoadingShown()
+}
+
+// dropStaleNotificationSubject forgets the open PR/Issue if another
+// notification is selected, so that keys never act on another notification
+// than the one selected.
+func (m *Model) dropStaleNotificationSubject() {
+	subjectId := m.notificationView.GetSubjectId()
+	row, ok := m.getCurrRowData().(*notificationrow.Data)
+	if subjectId == "" || !ok || row == nil || row.GetId() == subjectId {
+		return
+	}
+	log.Warn("Dropping PR/Issue of a notification that's no longer selected", "id", subjectId)
+	m.stashDraft()
+	m.notificationView.ClearSubject()
+	keys.SetNotificationSubject(keys.NotificationSubjectNone)
+}
+
 func (m *Model) backToNotification() tea.Cmd {
+	// Stop waiting for a PR/Issue that hasn't loaded yet
+	if m.isNotificationLoadingShown() {
+		m.notificationView.StopLoading()
+		if cmd := m.syncPreviewFullscreen(); cmd != nil {
+			return cmd
+		}
+		return m.syncSidebar()
+	}
 	if m.notificationView.GetSubjectPR() == nil && m.notificationView.GetSubjectIssue() == nil {
 		return nil
 	}
 
+	m.stashDraft()
 	m.notificationView.ClearSubject()
 	keys.SetNotificationSubject(keys.NotificationSubjectNone)
+	m.sidebar.ClearSearch()
 	m.sidebar.ScrollToTop()
+	if cmd := m.syncPreviewFullscreen(); cmd != nil {
+		return cmd
+	}
 	return m.syncSidebar()
 }
 
@@ -1274,6 +1701,484 @@ func (m *Model) promptConfirmation(currSection section.Section, action string) t
 		return currSection.SetIsPromptConfirmationShown(true)
 	}
 	return nil
+}
+
+func (m *Model) setSidebarPRContent() {
+	m.renderSidebarPRContent()
+	m.syncFocusedCommit(false)
+}
+
+func (m *Model) renderSidebarPRContent() {
+	body, comments := m.prView.ViewBodyWithAnchors()
+	m.setSidebarContentWithComments(m.prView.ViewHeader(), body,
+		m.prView.ViewEditor(m.draftHint()), comments)
+}
+
+func (m *Model) setSidebarIssueContent() {
+	body, comments := m.issueSidebar.ViewBodyWithAnchors()
+	m.setSidebarContentWithComments(m.issueSidebar.ViewHeader(), body,
+		m.issueSidebar.ViewEditor(m.draftHint()), comments)
+}
+
+func (m *Model) setSidebarContentWithComments(
+	header, body, editor string,
+	comments []common.CommentAnchor,
+) {
+	m.sidebarComments = comments
+	lines := make([]int, 0, len(comments))
+	for _, c := range comments {
+		lines = append(lines, c.Line)
+	}
+	m.sidebar.SetActionHints(m.notificationActionHints())
+	m.sidebar.SetContentWithHeader(header, body, editor, lines)
+}
+
+// notificationActionHints lists the keys for acting on an open notification
+// and its PR/Issue, shown above it, most important first. A notification
+// action whose key is taken by the PR/Issue isn't listed as it wouldn't work.
+func (m *Model) notificationActionHints() []sidebar.ActionHint {
+	if !m.isNotificationSubjectShown() {
+		return nil
+	}
+
+	var subjectKeys, subjectActions []key.Binding
+	if pr := m.notificationView.GetSubjectPR(); pr != nil {
+		subjectKeys = append(keys.PRFullHelp(), keys.CustomPRBindings...)
+		subjectActions = []key.Binding{keys.PRKeys.Comment, keys.PRKeys.Approve, keys.PRKeys.Diff,
+			keys.PRKeys.Checkout}
+		if pr.Primary != nil && pr.Primary.State == "OPEN" {
+			subjectActions = append(subjectActions, keys.PRKeys.Merge)
+		}
+	} else if issue := m.notificationView.GetSubjectIssue(); issue != nil {
+		subjectKeys = append(keys.IssueFullHelp(), keys.CustomIssueBindings...)
+		subjectActions = []key.Binding{keys.IssueKeys.Comment, keys.IssueKeys.Label,
+			keys.IssueKeys.Assign}
+		if issue.State == "OPEN" {
+			subjectActions = append(subjectActions, keys.IssueKeys.Close)
+		} else {
+			subjectActions = append(subjectActions, keys.IssueKeys.Reopen)
+		}
+	}
+
+	taken := func(b key.Binding) bool {
+		for _, k := range b.Keys() {
+			for _, sk := range subjectKeys {
+				if slices.Contains(sk.Keys(), k) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var hints []sidebar.ActionHint
+	notificationActions := []struct {
+		binding key.Binding
+		label   string
+	}{
+		{keys.NotificationKeys.MarkAsDone, "done"},
+		{keys.NotificationKeys.Unsubscribe, "unsubscribe"},
+		{keys.NotificationKeys.ToggleBookmark, "bookmark"},
+	}
+	for _, a := range notificationActions {
+		if a.binding.Enabled() && !taken(a.binding) {
+			hints = append(hints, sidebar.ActionHint{Key: keys.HintKeys(a.binding), Label: a.label})
+		}
+	}
+	for _, b := range subjectActions {
+		hints = append(hints, sidebar.ActionHint{Key: keys.HintKeys(b), Label: b.Help().Desc})
+	}
+	return hints
+}
+
+// draftHint is shown on a detached comment draft.
+func (m *Model) draftHint() string {
+	if m.confirmingDraftDiscard {
+		return "discard it? y/n"
+	}
+	return keys.HintKeys(keys.NotificationKeys.ContinueDraft) + " continue · " +
+		keys.HintKeys(keys.NotificationKeys.DiscardDraft) + " discard"
+}
+
+// hasDetachedDraft reports whether an open notification has a comment draft
+// that was detached from to read the preview.
+func (m *Model) hasDetachedDraft() bool {
+	if !m.isNotificationSubjectShown() {
+		return false
+	}
+	if m.notificationView.GetSubjectPR() != nil {
+		return m.prView.HasDetachedDraft()
+	}
+	return m.issueSidebar.HasDetachedDraft()
+}
+
+func (m *Model) continueDraft() tea.Cmd {
+	var cmd tea.Cmd
+	if m.notificationView.GetSubjectPR() != nil {
+		cmd = m.prView.AttachDraft()
+	} else {
+		cmd = m.issueSidebar.AttachDraft()
+	}
+	m.syncSidebar()
+	return cmd
+}
+
+func (m *Model) discardDraft() {
+	if m.notificationView.GetSubjectPR() != nil {
+		m.prView.DiscardEditor()
+	} else {
+		m.issueSidebar.DiscardEditor()
+	}
+	m.syncSidebar()
+}
+
+// stashDraft keeps the open notification's unsent comment, if any, so it can
+// be restored when the notification is opened again, and closes the editor.
+func (m *Model) stashDraft() {
+	id := m.notificationView.GetSubjectId()
+	if id == "" {
+		return
+	}
+	var draft string
+	if m.notificationView.GetSubjectPR() != nil {
+		draft = m.prView.DraftValue()
+		m.prView.DiscardEditor()
+	} else if m.notificationView.GetSubjectIssue() != nil {
+		draft = m.issueSidebar.DraftValue()
+		m.issueSidebar.DiscardEditor()
+	}
+	m.confirmingDraftDiscard = false
+	if strings.TrimSpace(draft) == "" {
+		return
+	}
+	if m.drafts == nil {
+		m.drafts = map[string]string{}
+	}
+	m.drafts[id] = draft
+	m.updateNotificationSections(notificationssection.UpdateNotificationDraftMsg{Id: id, HasDraft: true})
+}
+
+// restoreDraft brings back a notification's stashed comment, detached so it's
+// docked below the preview until continued.
+func (m *Model) restoreDraft(notificationId string, isPR bool) {
+	draft, ok := m.drafts[notificationId]
+	if !ok {
+		return
+	}
+	delete(m.drafts, notificationId)
+	if isPR {
+		m.prView.StartComment(draft, true)
+		m.prView.DetachDraft()
+	} else {
+		m.issueSidebar.StartComment(draft, true)
+		m.issueSidebar.DetachDraft()
+	}
+	m.updateNotificationSections(
+		notificationssection.UpdateNotificationDraftMsg{Id: notificationId, HasDraft: false})
+}
+
+// focusedComment returns the comment focused in an open notification's
+// preview, if any.
+func (m *Model) focusedComment() (common.CommentAnchor, bool) {
+	if !m.isNotificationSubjectShown() {
+		return common.CommentAnchor{}, false
+	}
+	i := m.sidebar.FocusedAnchor()
+	if i < 0 || i >= len(m.sidebarComments) || !m.sidebarComments[i].IsComment() {
+		return common.CommentAnchor{}, false
+	}
+	return m.sidebarComments[i], true
+}
+
+// focusedCommit returns the index of the commit focused in an open
+// notification's PR, if any.
+func (m *Model) focusedCommit() (int, bool) {
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil {
+		return 0, false
+	}
+	i := m.sidebar.FocusedAnchor()
+	if i < 0 || i >= len(m.sidebarComments) || m.sidebarComments[i].Commit == nil {
+		return 0, false
+	}
+	return *m.sidebarComments[i].Commit, true
+}
+
+func (m *Model) hasFocusedCommit() bool {
+	_, ok := m.focusedCommit()
+	return ok
+}
+
+// syncFocusedCommit keeps a commit focused in an open notification's PR and
+// shows its full message. When the focus is lost, e.g. on entering the tab or
+// moving above the first commit, the expanded commit is focused again, e.g.
+// coming back from its files, or else the first commit in view. Expanding a
+// commit changes where the commits after it start, so the focus is put back
+// on it once they're laid out anew. fromBelow is whether the focus moved up,
+// to show a commit too tall for the view from its bottom.
+func (m *Model) syncFocusedCommit(fromBelow bool) {
+	if m.prView.IsChecksTab() {
+		m.syncFocusedCheck(fromBelow)
+		return
+	}
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil ||
+		!m.prView.IsCommitsTab() {
+		return
+	}
+	commit, ok := m.focusedCommit()
+	if !ok {
+		if anchor := m.commitAnchor(m.prView.ExpandedCommitIndex()); anchor >= 0 {
+			m.sidebar.FocusAnchor(anchor, false)
+		} else if !m.sidebar.FocusVisible() {
+			return
+		}
+		if commit, ok = m.focusedCommit(); !ok {
+			return
+		}
+	}
+	if !m.prView.SetFocusedCommit(commit) {
+		return
+	}
+	anchor := m.sidebar.FocusedAnchor()
+	m.renderSidebarPRContent()
+	m.sidebar.FocusAnchor(anchor, fromBelow)
+}
+
+// focusedCheck returns the index of the check focused in an open
+// notification's PR, as listed, if any.
+func (m *Model) focusedCheck() (int, bool) {
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil {
+		return 0, false
+	}
+	i := m.sidebar.FocusedAnchor()
+	if i < 0 || i >= len(m.sidebarComments) || m.sidebarComments[i].Check == nil {
+		return 0, false
+	}
+	return *m.sidebarComments[i].Check, true
+}
+
+func (m *Model) hasFocusedCheck() bool {
+	_, ok := m.focusedCheck()
+	return ok
+}
+
+// syncFocusedCheck keeps a check focused in an open notification's PR and
+// shows its details, the way syncFocusedCommit does for commits.
+func (m *Model) syncFocusedCheck(fromBelow bool) {
+	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil ||
+		!m.prView.IsChecksTab() {
+		return
+	}
+	check, ok := m.focusedCheck()
+	if !ok {
+		if anchor := m.checkAnchor(m.prView.ExpandedCheckIndex()); anchor >= 0 {
+			m.sidebar.FocusAnchor(anchor, false)
+		} else if !m.sidebar.FocusVisible() {
+			return
+		}
+		if check, ok = m.focusedCheck(); !ok {
+			return
+		}
+	}
+	if !m.prView.SetFocusedCheck(check) {
+		return
+	}
+	anchor := m.sidebar.FocusedAnchor()
+	m.renderSidebarPRContent()
+	m.sidebar.FocusAnchor(anchor, fromBelow)
+}
+
+// checkAnchor returns the index of the sidebar anchor of the check at the
+// given index, or -1 when it has none.
+func (m *Model) checkAnchor(check int) int {
+	for i, c := range m.sidebarComments {
+		if c.Check != nil && *c.Check == check {
+			return i
+		}
+	}
+	return -1
+}
+
+// openFocusedCheck opens the check focused in an open notification's PR in
+// the browser, e.g. its job's log.
+func (m *Model) openFocusedCheck() tea.Cmd {
+	check, ok := m.focusedCheck()
+	if !ok {
+		return nil
+	}
+	url := m.prView.CheckUrl(check)
+	if url == "" {
+		m.ctx.Error = errors.New("this check has no page to open")
+		return nil
+	}
+	return m.openUrlInBrowser(url)
+}
+
+// commitAnchor returns the index of the sidebar anchor of the commit at the
+// given index, or -1 when it has none.
+func (m *Model) commitAnchor(commit int) int {
+	for i, c := range m.sidebarComments {
+		if c.Commit != nil && *c.Commit == commit {
+			return i
+		}
+	}
+	return -1
+}
+
+// viewFocusedCommitFiles switches an open notification's PR to its files
+// tab, narrowed to the focused commit's files.
+func (m *Model) viewFocusedCommitFiles() tea.Cmd {
+	commit, ok := m.focusedCommit()
+	if !ok {
+		return nil
+	}
+	cmd := m.prView.ViewCommitFiles(commit)
+	m.sidebar.ScrollToTop()
+	m.syncSidebar()
+	return cmd
+}
+
+func (m *Model) hasFocusedComment() bool {
+	_, ok := m.focusedComment()
+	return ok
+}
+
+// replyToFocusedComment opens the comment editor with the focused comment
+// quoted, like GitHub's "Quote reply".
+func (m *Model) replyToFocusedComment() tea.Cmd {
+	comment, ok := m.focusedComment()
+	if !ok {
+		return nil
+	}
+	quote := common.QuoteReply(comment.Body)
+	if m.hasDetachedDraft() {
+		// Quote it in the draft being written, like GitHub's quote reply
+		if m.notificationView.GetSubjectPR() != nil {
+			m.prView.AppendToDraft(quote)
+		} else {
+			m.issueSidebar.AppendToDraft(quote)
+		}
+		return m.continueDraft()
+	}
+	// Stay on the current tab so the comment being replied to stays in view
+	if m.notificationView.GetSubjectPR() != nil {
+		return m.openSidebarForInput(func(bool) tea.Cmd { return m.prView.StartComment(quote, true) })
+	}
+	return m.openSidebarForInput(func(bool) tea.Cmd { return m.issueSidebar.StartComment(quote, true) })
+}
+
+// refreshNotificationSubject refetches the open notification's PR/Issue,
+// keeping the tab, scroll position and any draft
+func (m *Model) refreshNotificationSubject() tea.Cmd {
+	notifId := m.notificationView.GetSubjectId()
+	pr, issue := m.notificationView.GetSubjectPR(), m.notificationView.GetSubjectIssue()
+	var url string
+	var number int
+	switch {
+	case pr != nil:
+		url, number = pr.Primary.Url, pr.Primary.Number
+	case issue != nil:
+		url, number = issue.Url, issue.Number
+	default:
+		return nil
+	}
+
+	taskId := fmt.Sprintf("notification_refresh_%s", notifId)
+	startCmd := m.ctx.StartTask(context.Task{
+		Id:           taskId,
+		StartText:    fmt.Sprintf("Refreshing #%d", number),
+		FinishedText: fmt.Sprintf("Refreshed #%d", number),
+		State:        context.TaskStart,
+	})
+	var updatedAt time.Time
+	row, ok := m.getCurrRowData().(*notificationrow.Data)
+	if ok && row != nil && row.GetId() == notifId {
+		updatedAt = row.Notification.UpdatedAt
+	}
+	return tea.Batch(startCmd, func() tea.Msg {
+		refreshed := notificationSubjectRefreshedMsg{NotificationId: notifId}
+		var err error
+		if pr != nil {
+			var fetched data.EnrichedPullRequestData
+			fetched, err = data.FetchPullRequest(url)
+			refreshed.PR = &fetched
+		} else {
+			var fetched data.IssueData
+			fetched, err = data.FetchIssue(url)
+			refreshed.Issue = &fetched
+		}
+		if err != nil {
+			return constants.TaskFinishedMsg{TaskId: taskId, Err: err}
+		}
+		// So it's this fresh when opened again
+		data.GetSubjectCache().Put(url, data.CachedSubject{
+			PR:        refreshed.PR,
+			Issue:     refreshed.Issue,
+			UpdatedAt: updatedAt,
+		})
+		return constants.TaskFinishedMsg{TaskId: taskId, Msg: refreshed}
+	})
+}
+
+// settlePendingComment stops graying out a comment once posting it finished
+func (m *Model) settlePendingComment(msg tea.Msg) {
+	var body string
+	var at time.Time
+	switch msg := msg.(type) {
+	case tasks.UpdatePRMsg:
+		c := cmp.Or(msg.PostedComment, msg.RemovedComment)
+		if c == nil {
+			return
+		}
+		body, at = c.Body, c.UpdatedAt
+	case tasks.UpdateIssueMsg:
+		c := cmp.Or(msg.PostedComment, msg.RemovedComment)
+		if c == nil {
+			return
+		}
+		body, at = c.Body, c.UpdatedAt
+	default:
+		return
+	}
+	delete(m.ctx.PendingComments, context.NewPendingComment(body, at))
+}
+
+// updateNotificationSubject applies a finished task's update, e.g. a posted
+// comment, to the open notification's PR/Issue, which isn't part of any
+// section
+func (m *Model) updateNotificationSubject(msg tea.Msg) {
+	pr, issue := m.notificationView.GetSubjectPR(), m.notificationView.GetSubjectIssue()
+	switch msg := msg.(type) {
+	case tasks.UpdatePRMsg:
+		if pr != nil && pr.Primary.Number == msg.PrNumber && msg.NewComment != nil {
+			pr.Enriched.Comments.Nodes = append(pr.Enriched.Comments.Nodes, *msg.NewComment)
+		}
+		if pr != nil && pr.Primary.Number == msg.PrNumber && msg.RemovedComment != nil {
+			pr.Enriched.Comments.Nodes = tasks.WithoutComment(
+				pr.Enriched.Comments.Nodes, *msg.RemovedComment)
+		}
+	case tasks.UpdateIssueMsg:
+		if issue != nil && issue.Number == msg.IssueNumber && msg.NewComment != nil {
+			issue.Comments.Nodes = append(issue.Comments.Nodes, *msg.NewComment)
+		}
+		if issue != nil && issue.Number == msg.IssueNumber && msg.RemovedComment != nil {
+			issue.Comments.Nodes = tasks.WithoutComment(issue.Comments.Nodes, *msg.RemovedComment)
+		}
+	case notificationSubjectRefreshedMsg:
+		// It's stale if another notification has been opened since
+		if m.notificationView.GetSubjectId() != msg.NotificationId {
+			return
+		}
+		if msg.PR != nil && pr != nil {
+			prData := msg.PR.ToPullRequestData()
+			m.notificationView.SetSubjectPR(&prrow.Data{
+				Primary:    &prData,
+				Enriched:   *msg.PR,
+				IsEnriched: true,
+			}, msg.NotificationId)
+		} else if msg.Issue != nil && issue != nil {
+			m.notificationView.SetSubjectIssue(msg.Issue, msg.NotificationId)
+		}
+	}
 }
 
 func (m *Model) syncSidebar() tea.Cmd {
@@ -1298,20 +2203,12 @@ func (m *Model) syncSidebar() tea.Cmd {
 		m.prView.SetSectionId(m.currSectionId)
 		m.prView.SetRow(row)
 		m.prView.SetWidth(width)
-		m.sidebar.SetContent(m.prView.View())
-		// Scroll to bottom if in input mode to keep inputbox visible
-		if m.prView.IsTextInputBoxFocused() {
-			m.sidebar.ScrollToBottom()
-		}
+		m.setSidebarPRContent()
 	case *data.IssueData:
 		m.issueSidebar.SetSectionId(m.currSectionId)
 		m.issueSidebar.SetRow(row)
 		m.issueSidebar.SetWidth(width)
-		m.sidebar.SetContent(m.issueSidebar.View())
-		// Scroll to bottom if in input mode to keep inputbox visible
-		if m.issueSidebar.IsTextInputBoxFocused() {
-			m.sidebar.ScrollToBottom()
-		}
+		m.setSidebarIssueContent()
 	case *notificationrow.Data:
 		notifId := row.GetId()
 
@@ -1322,27 +2219,30 @@ func (m *Model) syncSidebar() tea.Cmd {
 				m.prView.SetSectionId(0)
 				m.prView.SetRow(m.notificationView.GetSubjectPR())
 				m.prView.SetWidth(width)
-				m.sidebar.SetContent(m.prView.View())
-				// Scroll to bottom if in input mode to keep inputbox visible
-				if m.prView.IsTextInputBoxFocused() {
-					m.sidebar.ScrollToBottom()
-				}
+				m.setSidebarPRContent()
 			} else if m.notificationView.GetSubjectIssue() != nil {
 				m.issueSidebar.SetSectionId(0)
 				m.issueSidebar.SetRow(m.notificationView.GetSubjectIssue())
 				m.issueSidebar.SetWidth(width)
-				m.sidebar.SetContent(m.issueSidebar.View())
-				// Scroll to bottom if in input mode to keep inputbox visible
-				if m.issueSidebar.IsTextInputBoxFocused() {
-					m.sidebar.ScrollToBottom()
-				}
+				m.setSidebarIssueContent()
 			}
+			return nil
+		}
+
+		// Keep showing that its PR/Issue is loading
+		if m.notificationView.GetLoadingId() == notifId {
+			m.notificationView.SetRow(row)
+			m.notificationView.SetWidth(width)
+			m.sidebar.SetContent(m.notificationView.View())
 			return nil
 		}
 
 		// Clear cached subject when navigating to a different notification
 		// so key dispatch doesn't route keys to the wrong subject's handler.
+		m.stashDraft()
 		m.notificationView.ClearSubject()
+		m.notificationView.StopLoading()
+		m.sidebar.ClearSearch()
 		keys.SetNotificationSubject(keys.NotificationSubjectNone)
 		// Show prompt to view notification (don't auto-fetch)
 		// User must press Enter to view content and mark as read
@@ -1462,57 +2362,45 @@ func (m *Model) loadNotificationContent() tea.Cmd {
 
 	notifId := row.GetId()
 	subjectType := row.GetSubjectType()
-	subjectUrl := row.GetUrl()
-	latestCommentUrl := row.GetLatestCommentUrl()
 
-	// Show loading indicator
-	width := m.sidebar.GetSidebarContentWidth()
 	m.notificationView.SetRow(row)
-	m.notificationView.SetWidth(width)
-	m.sidebar.SetContent(m.notificationView.View())
-
 	switch subjectType {
-	case "PullRequest":
-		return tea.Batch(
-			func() tea.Msg {
-				_ = data.MarkNotificationRead(notifId)
-				return notificationssection.UpdateNotificationReadStateMsg{
-					Id:     notifId,
-					Unread: false,
-				}
-			},
-			func() tea.Msg {
-				pr, err := data.FetchPullRequest(subjectUrl)
-				return notificationPRFetchedMsg{
-					NotificationId:   notifId,
-					PR:               pr,
-					LatestCommentUrl: latestCommentUrl,
-					Err:              err,
-				}
-			},
-		)
-	case "Issue":
-		return tea.Batch(
-			func() tea.Msg {
-				_ = data.MarkNotificationRead(notifId)
-				return notificationssection.UpdateNotificationReadStateMsg{
-					Id:     notifId,
-					Unread: false,
-				}
-			},
-			func() tea.Msg {
-				issue, err := data.FetchIssue(subjectUrl)
-				return notificationIssueFetchedMsg{
-					NotificationId:   notifId,
-					Issue:            issue,
-					LatestCommentUrl: latestCommentUrl,
-					Err:              err,
-				}
-			},
-		)
+	case "PullRequest", "Issue":
+		markReadCmd := func() tea.Msg {
+			_ = data.MarkNotificationRead(notifId)
+			return notificationssection.UpdateNotificationReadStateMsg{
+				Id:     notifId,
+				Unread: false,
+			}
+		}
+
+		// Show it right away if it was fetched ahead of time
+		m.notificationView.StopLoading()
+		if subject, ok := data.GetSubjectCache().Get(row.GetUrl(), row.Notification.UpdatedAt); ok {
+			m.showNotificationSubject(notifId, subject, row.GetLatestCommentUrl())
+			var refreshCmd tea.Cmd
+			if time.Since(subject.FetchedAt) > data.SubjectMaxAge {
+				// Fetched a while ago, e.g. CI may have finished since
+				refreshCmd = m.refreshNotificationSubject()
+			}
+			return tea.Batch(markReadCmd, refreshCmd)
+		}
+
+		// Otherwise take over the screen right away, showing it's loading.
+		// If it's already being fetched ahead of time, that fetch is joined.
+		spinnerCmd := m.notificationView.StartLoading(notifId)
+		var layoutCmd tea.Cmd
+		if layoutCmd = m.syncPreviewFullscreen(); layoutCmd == nil {
+			layoutCmd = m.syncSidebar()
+		}
+		m.initPrefetchState()
+		m.prefetching[row.GetUrl()] = true
+		return tea.Batch(spinnerCmd, layoutCmd, markReadCmd, fetchNotificationSubject(*row))
 	default:
 		// For discussions, releases, etc. - mark as read and open in browser
 		// since we can't show rich content for these types
+		m.notificationView.SetWidth(m.sidebar.GetSidebarContentWidth())
+		m.sidebar.SetContent(m.notificationView.View())
 		return tea.Batch(
 			func() tea.Msg {
 				_ = data.MarkNotificationRead(notifId)
@@ -1571,42 +2459,57 @@ func (m *Model) getCurrentViewSections() []section.Section {
 	}
 }
 
+// rebuildAllSectionRows re-renders every section's rows, e.g. when colors
+// change, since rows are rendered to styled strings when their data arrives.
+func (m *Model) rebuildAllSectionRows() {
+	sections := slices.Concat(m.prs, m.issues, m.notifications)
+	if m.repo != nil {
+		sections = append(sections, m.repo)
+	}
+	for _, s := range sections {
+		if s != nil {
+			s.SetRows(s.BuildRows())
+		}
+	}
+}
+
 func (m *Model) updateTabs() {
 	sections := m.getCurrentViewSections()
 	m.tabs.SetSections(sections)
 }
 
 func (m *Model) switchSelectedView() tea.Cmd {
-	repoFF := config.IsFeatureEnabled(config.FF_REPO_VIEW)
-
-	// Reset notification subject when leaving notifications view
-	if m.ctx.View == config.NotificationsView {
-		keys.SetNotificationSubject(keys.NotificationSubjectNone)
-		m.notificationView.ClearSubject()
-	}
-
 	// View cycle: Notifications → PRs → Issues (→ Repo if enabled) → Notifications
-	if repoFF {
+	next := config.NotificationsView
+	if config.IsFeatureEnabled(config.FF_REPO_VIEW) {
 		switch m.ctx.View {
 		case config.NotificationsView:
-			m.ctx.View = config.PRsView
+			next = config.PRsView
 		case config.PRsView:
-			m.ctx.View = config.IssuesView
+			next = config.IssuesView
 		case config.IssuesView:
-			m.ctx.View = config.RepoView
-		case config.RepoView:
-			m.ctx.View = config.NotificationsView
+			next = config.RepoView
 		}
 	} else {
 		switch m.ctx.View {
 		case config.NotificationsView:
-			m.ctx.View = config.PRsView
+			next = config.PRsView
 		case config.PRsView:
-			m.ctx.View = config.IssuesView
-		default:
-			m.ctx.View = config.NotificationsView
+			next = config.IssuesView
 		}
 	}
+	return m.switchToView(next)
+}
+
+func (m *Model) switchToView(view config.ViewType) tea.Cmd {
+	// Reset notification subject when leaving notifications view
+	if m.ctx.View == config.NotificationsView {
+		keys.SetNotificationSubject(keys.NotificationSubjectNone)
+		m.stashDraft()
+		m.notificationView.ClearSubject()
+	}
+
+	m.ctx.View = view
 
 	m.syncMainContentDimensions()
 	m.setCurrSectionId(0)
@@ -1766,6 +2669,13 @@ func fetchUser() tea.Msg {
 
 type intervalRefresh time.Time
 
+// waitForDoneStoreChange delivers the next outside change to the done store.
+func waitForDoneStoreChange() tea.Msg {
+	return notificationssection.DoneStoreChangedMsg{
+		Undone: data.GetDoneStore().WaitForChange(),
+	}
+}
+
 func (m *Model) doRefreshAtInterval() tea.Cmd {
 	if m.ctx.Config.Defaults.RefetchIntervalMinutes == 0 {
 		return nil
@@ -1780,6 +2690,18 @@ func (m *Model) doRefreshAtInterval() tea.Cmd {
 }
 
 type updateFooterMsg struct{}
+
+type pollBackgroundColorMsg struct{}
+
+// backgroundPollInterval is how often we re-query the background color in
+// terminals that can't notify us when their color scheme changes.
+const backgroundPollInterval = time.Second
+
+func pollBackgroundColor() tea.Cmd {
+	return tea.Tick(backgroundPollInterval, func(time.Time) tea.Msg {
+		return pollBackgroundColorMsg{}
+	})
+}
 
 func (m *Model) doUpdateFooterAtInterval() tea.Cmd {
 	return tea.Tick(

@@ -61,7 +61,8 @@ type EnrichedPullRequestData struct {
 	ReviewRequests     ReviewRequests             `graphql:"reviewRequests(last: 100)"`
 	Reviews            Reviews                    `graphql:"reviews(last: 100)"`
 	SuggestedReviewers []SuggestedReviewer
-	Files              ChangedFiles `graphql:"files(first: 20)"`
+	Files              ChangedFiles  `graphql:"files(first: 20)"`
+	TimelineItems      TimelineItems `graphql:"timelineItems(last: 100, itemTypes: [PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT, BASE_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT, CROSS_REFERENCED_EVENT, REFERENCED_EVENT, LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT, REVIEW_DISMISSED_EVENT, RENAMED_TITLE_EVENT, MILESTONED_EVENT, DEMILESTONED_EVENT, MERGED_EVENT, CLOSED_EVENT, REOPENED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, HEAD_REF_DELETED_EVENT, HEAD_REF_RESTORED_EVENT, AUTO_MERGE_ENABLED_EVENT, AUTO_MERGE_DISABLED_EVENT, ADDED_TO_MERGE_QUEUE_EVENT, REMOVED_FROM_MERGE_QUEUE_EVENT, LOCKED_EVENT, UNLOCKED_EVENT])"`
 }
 
 type PullRequestData struct {
@@ -114,6 +115,14 @@ type CheckRun struct {
 	Name       graphql.String
 	Status     graphql.String
 	Conclusion checks.CheckRunState
+	// Title is a one-line summary of the run's output, e.g. "3 errors"
+	Title       graphql.String
+	StartedAt   time.Time
+	CompletedAt time.Time
+	// DetailsUrl is where the run's integrator shows its details, e.g. the
+	// job's log for GitHub Actions, and Url is the run's page on GitHub
+	DetailsUrl graphql.String
+	Url        graphql.String
 	CheckSuite struct {
 		Creator struct {
 			Login graphql.String
@@ -127,9 +136,12 @@ type CheckRun struct {
 }
 
 type StatusContext struct {
-	Context graphql.String
-	State   graphql.String
-	Creator struct {
+	Context     graphql.String
+	State       graphql.String
+	Description graphql.String
+	TargetUrl   graphql.String
+	CreatedAt   time.Time
+	Creator     struct {
 		Login graphql.String
 	}
 }
@@ -137,6 +149,8 @@ type StatusContext struct {
 type CheckSuiteNode struct {
 	Status     graphql.String
 	Conclusion graphql.String
+	Url        graphql.String
+	CreatedAt  time.Time
 
 	App struct {
 		Name graphql.String
@@ -168,9 +182,13 @@ type StatusCheckRollupStats struct {
 type AllCommits struct {
 	Nodes []struct {
 		Commit struct {
+			Oid             string
 			AbbreviatedOid  string
 			CommittedDate   time.Time
 			MessageHeadline string
+			MessageBody     string
+			Additions       int
+			Deletions       int
 			Author          struct {
 				Name string
 				User struct {
@@ -250,6 +268,7 @@ type Comment struct {
 		Login string
 	}
 	Body      string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
@@ -258,6 +277,7 @@ type ReviewComment struct {
 		Login string
 	}
 	Body      string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 	StartLine int
 	Line      int
@@ -282,6 +302,7 @@ type Review struct {
 	}
 	Body      string
 	State     string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
@@ -311,6 +332,62 @@ type ChangedFile struct {
 	Deletions  int
 	Path       string
 	ChangeType string
+}
+
+// commitFile is a file changed by a commit, as the REST API describes it
+type commitFile struct {
+	Filename  string `json:"filename"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+}
+
+// FetchCommitFiles fetches the files changed by a commit. The GraphQL API
+// doesn't list a commit's files, so this uses the REST API.
+func FetchCommitFiles(repoNameWithOwner, oid string) ([]ChangedFile, error) {
+	client, err := getRESTClient()
+	if err != nil {
+		return nil, err
+	}
+
+	var commit struct {
+		Files []commitFile `json:"files"`
+	}
+	log.Debug("Fetching commit files", "repo", repoNameWithOwner, "oid", oid)
+	err = client.Get(fmt.Sprintf("repos/%s/commits/%s", repoNameWithOwner, oid), &commit)
+	if err != nil {
+		return nil, err
+	}
+
+	files := make([]ChangedFile, 0, len(commit.Files))
+	for _, f := range commit.Files {
+		files = append(files, ChangedFile{
+			Additions:  f.Additions,
+			Deletions:  f.Deletions,
+			Path:       f.Filename,
+			ChangeType: restChangeType(f.Status),
+		})
+	}
+	return files, nil
+}
+
+// restChangeType converts a REST file status to the GraphQL change type,
+// e.g. "removed" to "DELETED".
+func restChangeType(status string) string {
+	switch status {
+	case "added":
+		return "ADDED"
+	case "removed":
+		return "DELETED"
+	case "renamed":
+		return "RENAMED"
+	case "copied":
+		return "COPIED"
+	case "changed":
+		return "CHANGED"
+	default:
+		return "MODIFIED"
+	}
 }
 
 type ChangedFiles struct {

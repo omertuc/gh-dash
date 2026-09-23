@@ -154,6 +154,13 @@ func (n *Notification) renderTitleBlock() string {
 		)
 		line1 = line1 + " " + bookmarkPrefix + ""
 	}
+	// Mark notifications with an unsent comment draft
+	if n.Data.HasDraft {
+		draftPrefix := utils.GetStylePrefix(
+			lipgloss.NewStyle().Foreground(n.Ctx.Theme.SecondaryText),
+		)
+		line1 = line1 + " " + draftPrefix + "✎"
+	}
 	line1Rendered := repoPrefix + line1
 
 	// Line 2: Title (bold for unread)
@@ -228,10 +235,11 @@ func (n *Notification) renderActivity() string {
 		return "\n\n"
 	}
 	// Use raw ANSI foreground codes without reset to avoid breaking row background
-	// White foreground for count, green foreground for icon
-	white := "\x1b[97m" // Bright white
+	// Default foreground for count so it's readable on both light and dark
+	// backgrounds, green foreground for icon
+	defaultFg := "\x1b[39m"
 	green := "\x1b[32m" // Green
-	return white + fmt.Sprintf(
+	return defaultFg + fmt.Sprintf(
 		"+%d ",
 		n.Data.NewCommentsCount,
 	) + green + constants.CommentsIcon + "\n\n"

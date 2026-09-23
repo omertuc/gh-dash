@@ -137,6 +137,10 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 				if msg.NewComment != nil {
 					currIssue.Comments.Nodes = append(currIssue.Comments.Nodes, *msg.NewComment)
 				}
+				if msg.RemovedComment != nil {
+					currIssue.Comments.Nodes = tasks.WithoutComment(
+						currIssue.Comments.Nodes, *msg.RemovedComment)
+				}
 				if msg.AddedAssignees != nil {
 					currIssue.Assignees.Nodes = addAssignees(
 						currIssue.Assignees.Nodes, msg.AddedAssignees.Nodes)

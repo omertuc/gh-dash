@@ -1,6 +1,7 @@
 package common_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -99,6 +100,62 @@ func TestGetRepoLocalPath(t *testing.T) {
 			got, found := common.GetRepoLocalPath(tc.repo, tc.configPaths)
 			require.Equal(t, tc.want, got)
 			require.Equal(t, tc.found, found)
+		})
+	}
+}
+
+func TestResolveRepoLocalPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	testCases := map[string]struct {
+		repo        string
+		cfgPaths    map[string]string
+		currentName string
+		currentPath string
+		want        string
+		wantErr     bool
+	}{
+		"config match wins over current repo": {
+			repo:        "user/repo",
+			cfgPaths:    configPaths,
+			currentName: "user/repo",
+			currentPath: "/cwd/repo",
+			want:        "/path/to/user/repo",
+		},
+		"falls back to current repo when it matches": {
+			repo:        "User/Repo",
+			currentName: "user/repo",
+			currentPath: "/cwd/repo",
+			want:        "/cwd/repo",
+		},
+		"does not fall back to an unrelated current repo": {
+			repo:        "user/other",
+			currentName: "user/repo",
+			currentPath: "/cwd/repo",
+			wantErr:     true,
+		},
+		"errors outside any repo": {
+			repo:    "user/other",
+			wantErr: true,
+		},
+		"expands tilde": {
+			repo:     "user/repo",
+			cfgPaths: map[string]string{"user/repo": "~/code/repo"},
+			want:     home + "/code/repo",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := common.ResolveRepoLocalPath(
+				tc.repo, tc.cfgPaths, tc.currentName, tc.currentPath)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
 }

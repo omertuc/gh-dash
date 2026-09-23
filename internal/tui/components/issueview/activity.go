@@ -4,10 +4,10 @@ import (
 	"sort"
 	"time"
 
-	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/markdown"
 	"github.com/dlvhdr/gh-dash/v4/internal/utils"
 )
@@ -15,10 +15,19 @@ import (
 type RenderedActivity struct {
 	UpdatedAt      time.Time
 	RenderedString string
+	Author         string
+	Body           string
 }
 
 func (m *Model) renderActivity() string {
-	width := m.getIndentedContentWidth() - 2
+	activity, _ := m.renderActivityWithAnchors()
+	return activity
+}
+
+// renderActivityWithAnchors renders the comments along with where each one
+// starts.
+func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
+	width := commentsContentWidth(m.width)
 	markdownRenderer := markdown.GetMarkdownRenderer(width, m.ctx)
 
 	var activity []RenderedActivity
@@ -30,6 +39,8 @@ func (m *Model) renderActivity() string {
 		activity = append(activity, RenderedActivity{
 			UpdatedAt:      comment.UpdatedAt,
 			RenderedString: renderedComment,
+			Author:         comment.Author.Login,
+			Body:           comment.Body,
 		})
 	}
 
@@ -39,17 +50,26 @@ func (m *Model) renderActivity() string {
 
 	body := ""
 	bodyStyle := lipgloss.NewStyle().PaddingLeft(2)
+	title := m.renderActivitiesTitle()
+	var anchors []common.CommentAnchor
 	if len(activity) == 0 {
 		body = renderEmptyState()
 	} else {
+		line := lipgloss.Height(title)
 		var renderedActivities []string
 		for _, activity := range activity {
 			renderedActivities = append(renderedActivities, activity.RenderedString)
+			anchors = append(anchors, common.CommentAnchor{
+				Line:   line,
+				Author: activity.Author,
+				Body:   activity.Body,
+			})
+			line += lipgloss.Height(activity.RenderedString)
 		}
 		body = lipgloss.JoinVertical(lipgloss.Left, renderedActivities...)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, m.renderActivitiesTitle(), bodyStyle.Render(body))
+	return lipgloss.JoinVertical(lipgloss.Left, title, bodyStyle.Render(body)), anchors
 }
 
 func (m Model) renderActivitiesTitle() string {
@@ -65,9 +85,14 @@ func renderEmptyState() string {
 
 func (m *Model) renderComment(
 	comment data.IssueComment,
-	markdownRenderer glamour.TermRenderer,
+	markdownRenderer markdown.Renderer,
 ) (string, error) {
-	width := m.getIndentedContentWidth() - 2
+	width := commentsContentWidth(m.width)
+	pending := m.ctx.IsPendingComment(comment.Body, comment.UpdatedAt)
+	elapsed := utils.TimeElapsed(comment.UpdatedAt)
+	if pending {
+		elapsed = "posting…"
+	}
 	header := lipgloss.NewStyle().
 		Width(width).
 		BorderStyle(lipgloss.RoundedBorder()).
@@ -78,11 +103,14 @@ func (m *Model) renderComment(
 			" ",
 			lipgloss.NewStyle().
 				Foreground(m.ctx.Theme.FaintText).
-				Render(utils.TimeElapsed(comment.UpdatedAt)),
+				Render(elapsed),
 		))
 
-	body := lineCleanupRegex.ReplaceAllString(comment.Body, "")
+	body := comment.Body
 	body, err := markdownRenderer.Render(body)
+	if pending {
+		body = common.RenderPending(body, m.ctx.Theme.FaintText)
+	}
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,

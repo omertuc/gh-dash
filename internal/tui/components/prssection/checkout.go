@@ -3,9 +3,6 @@ package prssection
 import (
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -20,13 +17,9 @@ func (m *Model) checkout() (tea.Cmd, error) {
 		return nil, errors.New("no pr selected")
 	}
 
-	repoName := pr.GetRepoNameWithOwner()
-	repoPath, ok := common.GetRepoLocalPath(repoName, m.Ctx.Config.RepoPaths)
-
-	if !ok {
-		return nil, errors.New(
-			"local path to repo not specified, set one in your config.yml under repoPaths",
-		)
+	repoPath, err := m.Ctx.RepoLocalPath(pr.GetRepoNameWithOwner())
+	if err != nil {
+		return nil, err
 	}
 
 	prNumber := pr.GetNumber()
@@ -40,19 +33,7 @@ func (m *Model) checkout() (tea.Cmd, error) {
 	}
 	startCmd := m.Ctx.StartTask(task)
 	return tea.Batch(startCmd, func() tea.Msg {
-		c := exec.Command(
-			"gh",
-			"pr",
-			"checkout",
-			fmt.Sprint(m.GetCurrRow().GetNumber()),
-		)
-		userHomeDir, _ := os.UserHomeDir()
-		if strings.HasPrefix(repoPath, "~") {
-			repoPath = strings.Replace(repoPath, "~", userHomeDir, 1)
-		}
-
-		c.Dir = repoPath
-		err := c.Run()
+		err := common.RunCmdInDir(repoPath, "gh", "pr", "checkout", fmt.Sprint(prNumber))
 		return constants.TaskFinishedMsg{TaskId: taskId, Err: err}
 	}), nil
 }

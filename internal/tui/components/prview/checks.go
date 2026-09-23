@@ -3,12 +3,18 @@ package prview
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
+	"github.com/dlvhdr/gh-dash/v4/internal/utils"
 	ghchecks "github.com/dlvhdr/x/gh-checks"
 )
 
@@ -420,27 +426,41 @@ func renderStatusContextName(statusContext data.StatusContext) string {
 	)
 }
 
-func (sidebar *Model) renderChecks() string {
-	title := sidebar.ctx.Styles.Common.MainTextStyle.MarginBottom(1).
-		Underline(true).
-		Render(" All Checks")
+// checkGroup is where a check is listed, in the order they're listed.
+type checkGroup int
 
-	commits := sidebar.pr.Data.Enriched.Commits.Nodes
+const (
+	groupAwaitingApproval checkGroup = iota
+	groupPending
+	groupFailure
+	groupWaiting
+	groupRest
+)
+
+// checkItem is a check as listed in the checks tab.
+type checkItem struct {
+	// key identifies the check across refreshes, which may reorder them
+	key   string
+	group checkGroup
+	glyph string
+	name  string
+	// when is when the check last changed, e.g. completed, if known
+	when time.Time
+	// details are shown below the check while it's expanded
+	details []string
+	// url is where the check is opened, if anywhere
+	url string
+}
+
+// checkItems lists the checks of the PR's last commit in the order they're
+// shown: awaiting approval, pending, failed, in progress and then the rest.
+func (m *Model) checkItems() []checkItem {
+	commits := m.pr.Data.Enriched.Commits.Nodes
 	if len(commits) == 0 {
-		return lipgloss.JoinVertical(
-			lipgloss.Left,
-			title,
-			"Loading...",
-		)
+		return nil
 	}
-
-	failures := make([]string, 0)
-	waiting := make([]string, 0)
-	rest := make([]string, 0)
-	awaitingApproval := make([]string, 0)
-	pending := make([]string, 0)
-
 	lastCommit := commits[0]
+	var items []checkItem
 
 	// Collect check suites that don't appear in statusCheckRollup
 	for _, suite := range lastCommit.Commit.CheckSuites.Nodes {
@@ -454,22 +474,27 @@ func (sidebar *Model) renderChecks() string {
 
 		if suite.Conclusion == "ACTION_REQUIRED" {
 			// Workflow requires approval before it can run
-			check := lipgloss.JoinHorizontal(
-				lipgloss.Top,
-				sidebar.ctx.Styles.Common.ActionRequiredGlyph,
-				" ",
-				workflowName,
-			)
-			awaitingApproval = append(awaitingApproval, check)
+			items = append(items, checkItem{
+				key:   "suite/" + workflowName,
+				group: groupAwaitingApproval,
+				glyph: m.ctx.Styles.Common.ActionRequiredGlyph,
+				name:  workflowName,
+				details: []string{fmt.Sprintf("Awaiting approval to run. Press %s to approve all.",
+					m.ctx.Styles.KeyHint.Render(keys.PRKeys.ApproveWorkflows.Keys()[0]))},
+				url:  string(suite.Url),
+				when: suite.CreatedAt,
+			})
 		} else if suite.Status == "QUEUED" || suite.Status == "PENDING" || suite.Status == "WAITING" {
 			// Workflow is queued/pending (will run automatically)
-			check := lipgloss.JoinHorizontal(
-				lipgloss.Top,
-				sidebar.ctx.Styles.Common.WaitingGlyph,
-				" ",
-				workflowName,
-			)
-			pending = append(pending, check)
+			items = append(items, checkItem{
+				key:     "suite/" + workflowName,
+				group:   groupPending,
+				glyph:   m.ctx.Styles.Common.WaitingGlyph,
+				name:    workflowName,
+				details: []string{humanizeState(string(suite.Status))},
+				url:     string(suite.Url),
+				when:    suite.CreatedAt,
+			})
 		}
 	}
 
@@ -477,106 +502,288 @@ func (sidebar *Model) renderChecks() string {
 	reportedChecks := make(map[string]bool)
 
 	for _, node := range lastCommit.Commit.StatusCheckRollup.Contexts.Nodes {
+		var item checkItem
 		var category CheckCategory
-		var check string
 		var checkName string
 		switch node.Typename {
 		case "CheckRun":
 			checkRun := node.CheckRun
-			var renderedStatus string
-			category, renderedStatus = sidebar.renderCheckRunConclusion(checkRun)
+			category, item.glyph = m.renderCheckRunConclusion(checkRun)
 			checkName = string(checkRun.Name)
-			name := renderCheckRunName(checkRun)
-			check = lipgloss.JoinHorizontal(lipgloss.Top, renderedStatus, " ", name)
+			item.name = renderCheckRunName(checkRun)
+			item.key = "run/" + item.name
+			item.details = checkRunDetails(checkRun)
+			item.when = checkRun.CompletedAt
+			if item.when.IsZero() {
+				item.when = checkRun.StartedAt
+			}
+			item.url = string(checkRun.DetailsUrl)
+			if item.url == "" {
+				item.url = string(checkRun.Url)
+			}
 		case "StatusContext":
 			statusContext := node.StatusContext
-			var status string
-			category, status = sidebar.renderStatusContextConclusion(statusContext)
+			category, item.glyph = m.renderStatusContextConclusion(statusContext)
 			checkName = string(statusContext.Context)
-			check = lipgloss.JoinHorizontal(
-				lipgloss.Top,
-				status,
-				" ",
-				renderStatusContextName(statusContext),
-			)
+			item.name = renderStatusContextName(statusContext)
+			item.key = "status/" + item.name
+			item.details = statusContextDetails(statusContext)
+			item.when = statusContext.CreatedAt
+			item.url = string(statusContext.TargetUrl)
 		}
 
 		reportedChecks[checkName] = true
 
 		switch category {
 		case CheckWaiting:
-			waiting = append(waiting, check)
+			item.group = groupWaiting
 		case CheckFailure:
-			failures = append(failures, check)
+			item.group = groupFailure
 		default:
-			rest = append(rest, check)
+			item.group = groupRest
 		}
+		items = append(items, item)
 	}
 
 	// Check for required status checks that haven't been reported yet
-	branchRules := sidebar.pr.Data.Primary.Repository.BranchProtectionRules.Nodes
+	branchRules := m.pr.Data.Primary.Repository.BranchProtectionRules.Nodes
 	if len(branchRules) > 0 {
 		for _, requiredContext := range branchRules[0].RequiredStatusCheckContexts {
 			contextName := string(requiredContext)
 			if !reportedChecks[contextName] {
 				// Required check hasn't been reported yet
-				check := lipgloss.JoinHorizontal(
-					lipgloss.Top,
-					sidebar.ctx.Styles.Common.WaitingGlyph,
-					" ",
-					contextName,
-				)
-				pending = append(pending, check)
+				items = append(items, checkItem{
+					key:     "required/" + contextName,
+					group:   groupPending,
+					glyph:   m.ctx.Styles.Common.WaitingGlyph,
+					name:    contextName,
+					details: []string{"Required, but hasn't been reported yet"},
+				})
 			}
 		}
 	}
 
-	if len(awaitingApproval)+len(pending)+len(waiting)+len(failures)+len(rest) == 0 {
+	slices.SortStableFunc(items, func(a, b checkItem) int {
+		return int(a.group) - int(b.group)
+	})
+	return items
+}
+
+// checkRunDetails describes a check run's state, how long it took and the
+// title of its output, e.g. "Failure · took 2m13s". When it happened is shown
+// on the check itself.
+func checkRunDetails(checkRun data.CheckRun) []string {
+	state := humanizeState(string(checkRun.Status))
+	if checkRun.Status == "COMPLETED" && checkRun.Conclusion != "" {
+		state = humanizeState(string(checkRun.Conclusion))
+	}
+	parts := []string{state}
+	if !checkRun.CompletedAt.IsZero() && !checkRun.StartedAt.IsZero() {
+		parts = append(parts,
+			"took "+checkRun.CompletedAt.Sub(checkRun.StartedAt).Round(time.Second).String())
+	}
+
+	details := []string{strings.Join(parts, " · ")}
+	if title := strings.TrimSpace(string(checkRun.Title)); title != "" {
+		details = append(details, title)
+	}
+	return details
+}
+
+// statusContextDetails describes a commit status's state and its
+// description.
+func statusContextDetails(statusContext data.StatusContext) []string {
+	details := []string{humanizeState(string(statusContext.State))}
+	if description := strings.TrimSpace(string(statusContext.Description)); description != "" {
+		details = append(details, description)
+	}
+	return details
+}
+
+// humanizeState turns an API state into words, e.g. "IN_PROGRESS" into
+// "In progress".
+func humanizeState(state string) string {
+	if state == "" {
+		return "Unknown"
+	}
+	s := strings.ToLower(strings.ReplaceAll(state, "_", " "))
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// renderChecks renders the list of checks along with where each check starts,
+// relative to the start of what's rendered, so they can be focused. The
+// expanded check shows its details.
+func (m *Model) renderChecks() (string, []common.CommentAnchor) {
+	title := m.ctx.Styles.Common.MainTextStyle.MarginBottom(1).
+		Underline(true).
+		Render(" All Checks")
+
+	commits := m.pr.Data.Enriched.Commits.Nodes
+	if len(commits) == 0 {
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			title,
+			"Loading...",
+		), nil
+	}
+
+	items := m.checkItems()
+	if len(items) == 0 {
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
 			title,
 			lipgloss.NewStyle().
 				Italic(true).
 				PaddingLeft(2).
-				Width(sidebar.getIndentedContentWidth()).
+				Width(m.getIndentedContentWidth()).
 				Render("No checks to display..."),
-		)
+		), nil
 	}
 
-	parts := make([]string, 0)
+	counts := map[checkGroup]int{}
+	for _, it := range items {
+		counts[it.group]++
+	}
 
-	// Show awaiting approval workflows first
-	if len(awaitingApproval) > 0 {
-		sectionHeader := lipgloss.NewStyle().
+	indented := lipgloss.NewStyle().PaddingLeft(2).Width(m.getIndentedContentWidth())
+	parts := []string{title}
+	line := lipgloss.Height(title)
+	add := func(s string) {
+		s = indented.Render(s)
+		parts = append(parts, s)
+		line += lipgloss.Height(s)
+	}
+	sectionHeader := func(s string) string {
+		return lipgloss.NewStyle().
 			Bold(true).
-			Foreground(sidebar.ctx.Theme.WarningText).
-			Render(fmt.Sprintf("Awaiting Approval (%d)", len(awaitingApproval)))
-		parts = append(parts, sectionHeader)
-		parts = append(parts, awaitingApproval...)
-		parts = append(parts, "") // spacing
+			Foreground(m.ctx.Theme.WarningText).
+			Render(s)
 	}
 
-	// Show pending workflows
-	if len(pending) > 0 {
-		sectionHeader := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(sidebar.ctx.Theme.WarningText).
-			Render(fmt.Sprintf("Pending (%d)", len(pending)))
-		parts = append(parts, sectionHeader)
-		parts = append(parts, pending...)
-		parts = append(parts, "") // spacing
+	anchors := make([]common.CommentAnchor, 0, len(items))
+	for i, it := range items {
+		// Awaiting approval and pending checks are listed first, under headers
+		if i == 0 || it.group != items[i-1].group {
+			if i > 0 && items[i-1].group <= groupPending {
+				add("") // spacing
+			}
+			switch it.group {
+			case groupAwaitingApproval:
+				add(sectionHeader(fmt.Sprintf("Awaiting Approval (%d)", counts[it.group])))
+			case groupPending:
+				add(sectionHeader(fmt.Sprintf("Pending (%d)", counts[it.group])))
+			}
+		}
+
+		idx := i
+		anchors = append(anchors, common.CommentAnchor{Line: line, Body: it.name, Check: &idx})
+		check, truncated := m.renderCheckTitle(it)
+		if it.key == m.expandedCheck {
+			if truncated {
+				// Show the whole of the name cut short on the check's line
+				it.details = append([]string{it.name}, it.details...)
+			}
+			check = lipgloss.JoinVertical(lipgloss.Left, check, m.renderCheckDetails(it))
+		}
+		add(check)
 	}
 
-	parts = append(parts, failures...)
-	parts = append(parts, waiting...)
-	parts = append(parts, rest...)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...), anchors
+}
 
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		title,
-		lipgloss.NewStyle().PaddingLeft(2).Width(sidebar.getIndentedContentWidth()).Render(
-			lipgloss.JoinVertical(lipgloss.Left, parts...)),
-	)
+// renderCheckTitle renders a check's line: its state and name, with when it
+// last changed at the right edge, e.g. "5m ago". A name too long for the line
+// is cut short, which it reports.
+func (m *Model) renderCheckTitle(it checkItem) (string, bool) {
+	width := m.getIndentedContentWidth() - 2
+	left := lipgloss.JoinHorizontal(lipgloss.Top, it.glyph, " ", it.name)
+	right := ""
+	if !it.when.IsZero() {
+		right = m.ctx.Styles.Common.FaintTextStyle.Render(utils.TimeElapsed(it.when) + " ago")
+	}
+	space := width - lipgloss.Width(right)
+	if right != "" {
+		space-- // keep a space before it
+	}
+	truncated := lipgloss.Width(left) > space
+	if truncated {
+		left = ansi.Truncate(left, max(0, space), constants.Ellipsis)
+	}
+	if right == "" {
+		return left, truncated
+	}
+	pad := strings.Repeat(" ", max(1, width-lipgloss.Width(left)-lipgloss.Width(right)))
+	return left + pad + right, truncated
+}
+
+// renderCheckDetails renders an expanded check's details below it, along a
+// line down its side, ending with where it's opened.
+func (m *Model) renderCheckDetails(it checkItem) string {
+	fainter := lipgloss.NewStyle().Foreground(m.ctx.Theme.FaintBorder)
+	prefix := fainter.Render("│ ")
+	width := max(1, m.getIndentedContentWidth()-2-lipgloss.Width(prefix))
+
+	lines := make([]string, 0, len(it.details)+1)
+	for _, d := range it.details {
+		wrapped := m.ctx.Styles.Common.MainTextStyle.Width(width).Render(d)
+		lines = append(lines, strings.Split(wrapped, "\n")...)
+	}
+	if it.url != "" {
+		lines = append(lines, m.ctx.Styles.Common.FaintTextStyle.Render(
+			ansi.Truncate(it.url, width, constants.Ellipsis)))
+	}
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+// SetFocusedCheck expands the check at the given index, as listed, to show
+// its details, collapsing any other. It reports whether that changed
+// anything.
+func (m *Model) SetFocusedCheck(i int) bool {
+	key := ""
+	if m.hasData() {
+		if items := m.checkItems(); i >= 0 && i < len(items) {
+			key = items[i].key
+		}
+	}
+	if key == m.expandedCheck {
+		return false
+	}
+	m.expandedCheck = key
+	return true
+}
+
+// ExpandedCheckIndex returns the index of the check shown with its details,
+// as listed, or -1 when none is.
+func (m Model) ExpandedCheckIndex() int {
+	if m.expandedCheck == "" || !m.hasData() {
+		return -1
+	}
+	for i, it := range m.checkItems() {
+		if it.key == m.expandedCheck {
+			return i
+		}
+	}
+	return -1
+}
+
+// CheckUrl returns where the check at the given index, as listed, is opened,
+// or "" when it can't be.
+func (m Model) CheckUrl(i int) string {
+	if !m.hasData() {
+		return ""
+	}
+	if items := m.checkItems(); i >= 0 && i < len(items) {
+		return items[i].url
+	}
+	return ""
+}
+
+// IsChecksTab reports whether the checks tab is selected.
+func (m Model) IsChecksTab() bool {
+	return m.carousel.Cursor() == checksTab
 }
 
 type checksStats struct {

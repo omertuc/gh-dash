@@ -177,8 +177,12 @@ type Table interface {
 	PrevRow() int
 	FirstItem() int
 	LastItem() int
+	// RowAt returns the row under the mouse, or -1 for none
+	RowAt(msg tea.MouseMsg) int
+	SelectRow(row int) int
 	FetchNextPageSectionRows() []tea.Cmd
 	BuildRows() []table.Row
+	SetRows(rows []table.Row)
 	ResetRows()
 	GetIsLoading() bool
 	SetIsLoading(val bool) tea.Cmd
@@ -346,6 +350,14 @@ func (m *BaseModel) LastItem() int {
 	return m.Table.LastItem()
 }
 
+func (m *BaseModel) RowAt(msg tea.MouseMsg) int {
+	return m.Table.ItemAt(msg)
+}
+
+func (m *BaseModel) SelectRow(row int) int {
+	return m.Table.SelectItem(row)
+}
+
 func (m *BaseModel) IsSearchFocused() bool {
 	return m.IsSearching
 }
@@ -431,7 +443,9 @@ func (m *BaseModel) GetFilters() string {
 }
 
 func (m *BaseModel) GetMainContent() string {
-	if m.Table.Rows == nil {
+	// While the first page loads, show the table's loading spinner rather
+	// than the tip
+	if m.Table.Rows == nil && !m.Table.IsLoading() {
 		d := m.GetDimensions()
 		return lipgloss.Place(
 			d.Width,
@@ -462,6 +476,10 @@ func (m *BaseModel) View() string {
 				m.GetMainContent(),
 			),
 		)
+}
+
+func (m *BaseModel) SetRows(rows []table.Row) {
+	m.Table.SetRows(rows)
 }
 
 func (m *BaseModel) ResetRows() {

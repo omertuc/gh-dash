@@ -5,21 +5,43 @@ import (
 	"sort"
 	"time"
 
-	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/markdown"
 	"github.com/dlvhdr/gh-dash/v4/internal/utils"
 )
 
 type RenderedActivity struct {
-	UpdatedAt      time.Time
+	CreatedAt      time.Time
 	RenderedString string
+	Author         string
+	Body           string
+	// Event is set for timeline events, e.g. commits and force pushes, which
+	// are rendered along with the events next to them
+	Event *data.TimelineItem
+}
+
+// activityTime is when a comment or review was posted. Comments added locally
+// after posting them only have an update time.
+func activityTime(createdAt, updatedAt time.Time) time.Time {
+	if createdAt.IsZero() {
+		return updatedAt
+	}
+	return createdAt
 }
 
 func (m *Model) renderActivity() string {
+	activity, _ := m.renderActivityWithAnchors()
+	return activity
+}
+
+// renderActivityWithAnchors renders the activity tab along with where each
+// comment or review starts. Timeline events, e.g. pushed commits, show
+// between them in the order they happened.
+func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 	width := m.getIndentedContentWidth()
 	markdownRenderer := markdown.GetMarkdownRenderer(width, m.ctx)
 	bodyStyle := lipgloss.NewStyle()
@@ -28,7 +50,7 @@ func (m *Model) renderActivity() string {
 	var comments []comment
 
 	if !m.pr.Data.IsEnriched {
-		return bodyStyle.Render("Loading...")
+		return bodyStyle.Render("Loading..."), nil
 	}
 
 	for _, review := range m.pr.Data.Enriched.ReviewThreads.Nodes {
@@ -38,6 +60,7 @@ func (m *Model) renderActivity() string {
 			comments = append(comments, comment{
 				Author:    c.Author.Login,
 				Body:      c.Body,
+				CreatedAt: activityTime(c.CreatedAt, c.UpdatedAt),
 				UpdatedAt: c.UpdatedAt,
 				Path:      &path,
 				Line:      &line,
@@ -49,7 +72,9 @@ func (m *Model) renderActivity() string {
 		comments = append(comments, comment{
 			Author:    c.Author.Login,
 			Body:      c.Body,
+			CreatedAt: activityTime(c.CreatedAt, c.UpdatedAt),
 			UpdatedAt: c.UpdatedAt,
+			Pending:   m.ctx.IsPendingComment(c.Body, c.UpdatedAt),
 		})
 	}
 
@@ -59,8 +84,10 @@ func (m *Model) renderActivity() string {
 			continue
 		}
 		activities = append(activities, RenderedActivity{
-			UpdatedAt:      comment.UpdatedAt,
+			CreatedAt:      comment.CreatedAt,
 			RenderedString: renderedComment,
+			Author:         comment.Author,
+			Body:           comment.Body,
 		})
 	}
 
@@ -70,30 +97,59 @@ func (m *Model) renderActivity() string {
 			continue
 		}
 		activities = append(activities, RenderedActivity{
-			UpdatedAt:      review.UpdatedAt,
+			CreatedAt:      activityTime(review.CreatedAt, review.UpdatedAt),
 			RenderedString: renderedReview,
+			Author:         review.Author.Login,
+			Body:           review.Body,
 		})
 	}
+	numComments := len(activities)
 
-	sort.Slice(activities, func(i, j int) bool {
-		return activities[i].UpdatedAt.Before(activities[j].UpdatedAt)
+	for i := range m.pr.Data.Enriched.TimelineItems.Nodes {
+		item := &m.pr.Data.Enriched.TimelineItems.Nodes[i]
+		activities = append(activities, RenderedActivity{CreatedAt: item.Event().CreatedAt, Event: item})
+	}
+
+	sort.SliceStable(activities, func(i, j int) bool {
+		return activities[i].CreatedAt.Before(activities[j].CreatedAt)
 	})
 
 	body := ""
+	var anchors []common.CommentAnchor
 	if len(activities) == 0 {
 		body = renderEmptyState()
 	} else {
-		var renderedActivities []string
-		for _, activity := range activities {
-			renderedActivities = append(renderedActivities, activity.RenderedString)
-		}
 		title := m.ctx.Styles.Common.MainTextStyle.MarginBottom(1).Underline(true).Render(
-			fmt.Sprintf("%s  %d comments", constants.CommentsIcon, len(activities)))
+			fmt.Sprintf("%s  %d comments", constants.CommentsIcon, numComments))
+		line := lipgloss.Height(title)
+		var renderedActivities []string
+		for i := 0; i < len(activities); i++ {
+			activity := activities[i]
+			if activity.Event != nil {
+				var events []data.TimelineItem
+				for ; i < len(activities) && activities[i].Event != nil; i++ {
+					events = append(events, *activities[i].Event)
+				}
+				i--
+				if rendered := m.renderTimelineItems(events); rendered != "" {
+					renderedActivities = append(renderedActivities, rendered)
+					line += lipgloss.Height(rendered)
+				}
+				continue
+			}
+			renderedActivities = append(renderedActivities, activity.RenderedString)
+			anchors = append(anchors, common.CommentAnchor{
+				Line:   line,
+				Author: activity.Author,
+				Body:   activity.Body,
+			})
+			line += lipgloss.Height(activity.RenderedString)
+		}
 		body = lipgloss.JoinVertical(lipgloss.Left, renderedActivities...)
 		body = lipgloss.JoinVertical(lipgloss.Left, title, body)
 	}
 
-	return bodyStyle.Render(body)
+	return bodyStyle.Render(body), anchors
 }
 
 func renderEmptyState() string {
@@ -102,17 +158,24 @@ func renderEmptyState() string {
 
 type comment struct {
 	Author    string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 	Body      string
 	Path      *string
 	Line      *int
+	// Pending is set while the comment is being posted
+	Pending bool
 }
 
 func (m *Model) renderComment(
 	comment comment,
-	markdownRenderer glamour.TermRenderer,
+	markdownRenderer markdown.Renderer,
 ) (string, error) {
 	width := m.getIndentedContentWidth()
+	elapsed := utils.TimeElapsed(comment.UpdatedAt)
+	if comment.Pending {
+		elapsed = "posting…"
+	}
 	authorAndTime := lipgloss.NewStyle().
 		Width(width).
 		BorderStyle(lipgloss.RoundedBorder()).
@@ -123,7 +186,7 @@ func (m *Model) renderComment(
 			" ",
 			lipgloss.NewStyle().
 				Foreground(m.ctx.Theme.FaintText).
-				Render(utils.TimeElapsed(comment.UpdatedAt)),
+				Render(elapsed),
 		))
 
 	var header string
@@ -140,8 +203,11 @@ func (m *Model) renderComment(
 		header = authorAndTime
 	}
 
-	body := lineCleanupRegex.ReplaceAllString(comment.Body, "")
+	body := comment.Body
 	body, err := markdownRenderer.Render(body)
+	if comment.Pending {
+		body = common.RenderPending(body, m.ctx.Theme.FaintText)
+	}
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -152,7 +218,7 @@ func (m *Model) renderComment(
 
 func (m *Model) renderReview(
 	review data.Review,
-	markdownRenderer glamour.TermRenderer,
+	markdownRenderer markdown.Renderer,
 ) (string, error) {
 	header := m.renderReviewHeader(review)
 	body, err := markdownRenderer.Render(review.Body)

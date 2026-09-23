@@ -223,17 +223,7 @@ var CustomDarkStyleConfig = ansi.StyleConfig{
 			},
 		},
 	},
-	Table: ansi.StyleTable{
-		StyleBlock: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{
-				Format:  " ",
-				Conceal: boolPtr(true),
-			},
-		},
-		CenterSeparator: stringPtr(""),
-		ColumnSeparator: stringPtr(""),
-		RowSeparator:    stringPtr(""),
-	},
+	Table: ansi.StyleTable{},
 	DefinitionDescription: ansi.StylePrimitive{
 		BlockPrefix: " ",
 	},

@@ -27,7 +27,6 @@ import (
 
 var (
 	htmlCommentRegex = regexp.MustCompile("(?U)<!--(.|[[:space:]])*-->")
-	lineCleanupRegex = regexp.MustCompile(`((\n)+|^)([^\r\n]*\|[^\r\n]*(\n)?)+`)
 )
 
 type Model struct {
@@ -124,6 +123,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd, *IssueAction) {
 }
 
 func (m Model) View() string {
+	return m.ViewHeader() + "\n" + m.ViewBody()
+}
+
+// ViewHeader renders the top of the preview: the issue's name, title, status
+// and author.
+func (m Model) ViewHeader() string {
 	s := strings.Builder{}
 
 	s.WriteString(m.renderFullNameAndNumber())
@@ -134,7 +139,21 @@ func (m Model) View() string {
 	s.WriteString(m.renderStatusPill())
 	s.WriteString("\n\n")
 	s.WriteString(m.renderAuthor())
-	s.WriteString("\n\n")
+
+	// End with a blank line to separate the header from the body
+	return m.contentStyle().Render(s.String()) + "\n"
+}
+
+// ViewBody renders the rest of the preview below the header: labels, the
+// issue's description and its comments.
+func (m Model) ViewBody() string {
+	body, _ := m.ViewBodyWithAnchors()
+	return body
+}
+
+// ViewBodyWithAnchors renders the body along with where each comment starts.
+func (m Model) ViewBodyWithAnchors() (string, []common.CommentAnchor) {
+	s := strings.Builder{}
 
 	labels := m.renderLabels()
 	if labels != "" {
@@ -144,13 +163,71 @@ func (m Model) View() string {
 
 	s.WriteString(m.renderBody())
 	s.WriteString("\n\n")
-	s.WriteString(m.renderActivity())
-
-	if m.editor.Mode() != cmpcontroller.ModeNone {
-		s.WriteString(m.ctx.Styles.Sidebar.InputBox.Render(m.editor.View()))
+	activityStart := strings.Count(s.String(), "\n")
+	activity, anchors := m.renderActivityWithAnchors()
+	s.WriteString(activity)
+	for i := range anchors {
+		anchors[i].Line += activityStart
 	}
 
-	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).Render(s.String())
+	return m.contentStyle().Render(s.String()), anchors
+}
+
+// ViewEditor renders the editor, docked below the preview's content, or ""
+// when it isn't open. A detached draft is shown compactly with detachedHint.
+func (m Model) ViewEditor(detachedHint string) string {
+	if !m.editor.Active() {
+		return ""
+	}
+	editor := m.editor.View()
+	if m.editor.Detached() {
+		editor = m.editor.DetachedView(detachedHint)
+	}
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding).
+		Render(m.ctx.Styles.Sidebar.InputBox.Render(editor))
+}
+
+// HasDetachedDraft reports whether there's a comment being written that was
+// detached from to read the preview.
+func (m *Model) HasDetachedDraft() bool {
+	return m.editor.Detached() && m.editor.Mode() == cmpcontroller.ModeComment
+}
+
+// AttachDraft returns to a detached draft.
+func (m *Model) AttachDraft() tea.Cmd {
+	return m.editor.Attach()
+}
+
+// DetachDraft leaves the comment being written, keeping it as a draft.
+func (m *Model) DetachDraft() {
+	if m.editor.Mode() == cmpcontroller.ModeComment {
+		m.editor.Detach()
+	}
+}
+
+// DraftValue returns the comment being written, if any.
+func (m *Model) DraftValue() string {
+	if m.editor.Mode() != cmpcontroller.ModeComment {
+		return ""
+	}
+	return m.editor.Value()
+}
+
+// AppendToDraft adds text to the end of the comment being written, on its own
+// paragraph.
+func (m *Model) AppendToDraft(text string) {
+	m.editor.SetValue(common.AppendParagraph(m.editor.Value(), text))
+}
+
+// DiscardEditor closes the editor, dropping anything written in it.
+func (m *Model) DiscardEditor() {
+	if m.editor.Active() {
+		m.editor.Exit()
+	}
+}
+
+func (m Model) contentStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Padding(0, m.ctx.Styles.Sidebar.ContentPadding)
 }
 
 func (m *Model) ViewCompletions() string {
@@ -214,11 +291,7 @@ func (m *Model) renderAuthor() string {
 
 func (m *Model) renderBody() string {
 	width := m.getIndentedContentWidth()
-	// Strip HTML comments from body and cleanup body.
-	body := htmlCommentRegex.ReplaceAllString(m.issue.Data.Body, "")
-	body = lineCleanupRegex.ReplaceAllString(body, "")
-
-	body = strings.TrimSpace(body)
+	body := bodyMarkdown(m.issue.Data.Body)
 	if body == "" {
 		return lipgloss.NewStyle().
 			Italic(true).
@@ -251,7 +324,44 @@ func (m *Model) renderLabels() string {
 }
 
 func (m *Model) getIndentedContentWidth() int {
-	return m.width - 6
+	return indentedContentWidth(m.width)
+}
+
+func indentedContentWidth(width int) int {
+	return width - 6
+}
+
+// commentsContentWidth is the width comments are rendered at, given the
+// preview's width.
+func commentsContentWidth(width int) int {
+	return indentedContentWidth(width) - 2
+}
+
+// bodyMarkdown is the markdown shown for an issue's description, without
+// HTML comments.
+func bodyMarkdown(body string) string {
+	return strings.TrimSpace(htmlCommentRegex.ReplaceAllString(body, ""))
+}
+
+// MarkdownPrerenderer returns a function that renders the markdown the
+// preview shows for issue, at the given preview width, into the markdown
+// cache, so showing it later is instant. It reads ctx, so it must be created
+// on the UI goroutine, while the function it returns is meant to run in the
+// background.
+func MarkdownPrerenderer(ctx *context.ProgramContext, issue *data.IssueData, width int) func() {
+	bodyRenderer := markdown.GetMarkdownRenderer(indentedContentWidth(width), ctx)
+	commentsRenderer := markdown.GetMarkdownRenderer(commentsContentWidth(width), ctx)
+	body := bodyMarkdown(issue.Body)
+	comments := make([]string, 0, len(issue.Comments.Nodes))
+	for _, c := range issue.Comments.Nodes {
+		comments = append(comments, c.Body)
+	}
+	return func() {
+		if body != "" {
+			bodyRenderer.Prerender(body)
+		}
+		commentsRenderer.Prerender(comments...)
+	}
 }
 
 func (m *Model) SetWidth(width int) {
@@ -274,7 +384,7 @@ func (m *Model) SetRow(data *data.IssueData) {
 }
 
 func (m *Model) IsTextInputBoxFocused() bool {
-	return m.editor.Active()
+	return m.editor.Active() && !m.editor.Detached()
 }
 
 func (m *Model) UpdateProgramContext(ctx *context.ProgramContext) {
@@ -291,25 +401,33 @@ func (m *Model) GetIsCommenting() bool {
 }
 
 func (m *Model) SetIsCommenting(isCommenting bool) tea.Cmd {
-	if m.issue == nil {
-		return nil
-	}
-
 	if !isCommenting {
-		if m.editor.Mode() == cmpcontroller.ModeComment {
+		if m.issue != nil && m.editor.Mode() == cmpcontroller.ModeComment {
 			m.editor.Exit()
 		}
+		return nil
+	}
+	return m.StartComment("", false)
+}
+
+// StartComment opens the comment editor with text already in it, e.g. a
+// quoted comment to reply to. When detachable, esc leaves the editor keeping
+// the draft, rather than cancelling.
+func (m *Model) StartComment(text string, detachable bool) tea.Cmd {
+	if m.issue == nil {
 		return nil
 	}
 
 	m.editor.SetAutocompleteSource(&fuzzyselect.UserMentionSource{WithAtSymbol: true})
 	cmd := m.editor.Enter(cmpcontroller.EnterOptions{
+		InitialValue:                     text,
 		Mode:                             cmpcontroller.ModeComment,
 		Prompt:                           constants.CommentPrompt,
 		Repo:                             m.repoRef(),
 		EnterFetch:                       cmpcontroller.FetchSilent,
 		ConfirmDiscardOnCancel:           true,
 		HideAutocompleteWhenContextEmpty: true,
+		Detachable:                       detachable,
 	})
 	return cmd
 }

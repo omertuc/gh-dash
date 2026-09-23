@@ -1,12 +1,14 @@
 package carousel
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	zone "github.com/lrstanley/bubblezone/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 )
@@ -26,6 +28,8 @@ type Model struct {
 	showSeparators         bool
 	separator              string
 	styles                 Styles
+	// zonePrefix, when set, marks each item as a clickable zone
+	zonePrefix string
 
 	content string
 	start   int
@@ -147,6 +151,38 @@ func WithSeparators(sep ...string) Option {
 			m.separator = sep[0]
 		}
 	}
+}
+
+// WithZonePrefix marks each rendered item as a mouse zone named by the prefix
+// and the item's index, so ItemAt can tell which item was clicked.
+func WithZonePrefix(prefix string) Option {
+	return func(m *Model) {
+		m.zonePrefix = prefix
+	}
+}
+
+// ItemAt returns the index of the shown item under the mouse, or -1 for none.
+func (m Model) ItemAt(msg tea.MouseMsg) int {
+	if m.zonePrefix == "" {
+		return -1
+	}
+	for i := m.start; i <= m.end && i < len(m.items); i++ {
+		if zone.Get(m.zoneId(i)).InBounds(msg) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m Model) zoneId(itemID int) string {
+	return fmt.Sprintf("%s%d", m.zonePrefix, itemID)
+}
+
+func (m Model) markZone(itemID int, s string) string {
+	if m.zonePrefix == "" {
+		return s
+	}
+	return zone.Mark(m.zoneId(itemID), s)
 }
 
 // WithFocused sets the focus state of the carousel.
@@ -288,6 +324,20 @@ func (m *Model) UpdateContent() {
 		lipgloss.JoinHorizontal(lipgloss.Center, loIndicator, itemsContent, roIndicator))
 }
 
+// ItemsWidth returns the width needed to show every item without truncating
+// or scrolling.
+func (m Model) ItemsWidth() int {
+	width := 0
+	for i, item := range m.items {
+		width += max(lipgloss.Width(m.styles.Item.Render(item)),
+			lipgloss.Width(m.styles.Selected.Render(item)))
+		if m.showSeparators && i != len(m.items)-1 {
+			width += lipgloss.Width(m.styles.Separator.Render(m.separator))
+		}
+	}
+	return width
+}
+
 // SelectedItem returns the selected item.
 func (m Model) SelectedItem() string {
 	return m.items[m.cursor]
@@ -374,7 +424,7 @@ func (m *Model) renderItem(itemID int, maxWidth int) string {
 	if itemID == m.cursor {
 		return lipgloss.JoinHorizontal(
 			lipgloss.Center,
-			m.styles.Selected.Render(item),
+			m.markZone(itemID, m.styles.Selected.Render(item)),
 			sep,
 		)
 	}
@@ -399,7 +449,7 @@ func (m *Model) renderItem(itemID int, maxWidth int) string {
 
 	return lipgloss.JoinHorizontal(
 		lipgloss.Center,
-		item,
+		m.markZone(itemID, item),
 		sep,
 	)
 }
