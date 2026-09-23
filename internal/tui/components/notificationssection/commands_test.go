@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -293,5 +294,36 @@ func TestNotificationUpdatesRerenderOnlyAffectedRow(t *testing.T) {
 	}
 	if slices.Equal(m.Table.Rows[1], before[1]) || slices.Equal(m.Table.Rows[2], before[2]) {
 		t.Fatal("updated rows were not re-rendered")
+	}
+}
+
+func TestLoadingSpinnerShownInsteadOfTipWhileFirstPageLoads(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../../../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to parse config: %v", err)
+	}
+
+	ctx := &context.ProgramContext{
+		Config:            &cfg,
+		MainContentWidth:  100,
+		MainContentHeight: 30,
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	m := NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	m.UpdateProgramContext(ctx)
+
+	m.SetIsLoading(true)
+	if view := m.GetMainContent(); !strings.Contains(view, "Loading") || strings.Contains(view, "Tip") {
+		t.Fatalf("expected loading spinner, not the tip, while loading:\n%s", view)
+	}
+
+	m.SetIsLoading(false)
+	if view := m.GetMainContent(); !strings.Contains(view, "Tip") {
+		t.Fatalf("expected the tip when not loading and there are no rows:\n%s", view)
 	}
 }

@@ -285,7 +285,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prevSection := m.getSectionAt(m.getPrevSectionId())
 			if prevSection != nil {
 				m.setCurrSectionId(prevSection.GetId())
-				cmd = m.onViewedRowChanged()
+				cmd = tea.Batch(m.onViewedRowChanged(), m.resumeLoadingSpinner())
 			}
 
 		case key.Matches(msg, m.keys.NextSection):
@@ -293,7 +293,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			nextSection := m.getSectionAt(nextSectionId)
 			if nextSection != nil {
 				m.setCurrSectionId(nextSection.GetId())
-				cmd = m.onViewedRowChanged()
+				cmd = tea.Batch(m.onViewedRowChanged(), m.resumeLoadingSpinner())
 			}
 
 		// With a notification's PR/Issue open, navigation keys scroll within it
@@ -1116,6 +1116,17 @@ type notificationIssueFetchedMsg struct {
 	Issue            data.IssueData
 	LatestCommentUrl string
 	Err              error
+}
+
+// resumeLoadingSpinner restarts the current section's loading spinner if it's
+// still loading. Spinner ticks only go to the current section, so a section
+// that was loading in the background has a stopped spinner.
+func (m *Model) resumeLoadingSpinner() tea.Cmd {
+	currSection := m.getCurrSection()
+	if currSection == nil || !currSection.GetIsLoading() {
+		return nil
+	}
+	return currSection.SetIsLoading(true)
 }
 
 func (m *Model) setCurrSectionId(newSectionId int) {

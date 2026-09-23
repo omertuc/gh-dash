@@ -431,7 +431,9 @@ func (m *BaseModel) GetFilters() string {
 }
 
 func (m *BaseModel) GetMainContent() string {
-	if m.Table.Rows == nil {
+	// While the first page loads, show the table's loading spinner rather
+	// than the tip
+	if m.Table.Rows == nil && !m.Table.IsLoading() {
 		d := m.GetDimensions()
 		return lipgloss.Place(
 			d.Width,
