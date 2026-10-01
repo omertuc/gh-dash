@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/plugins"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
@@ -450,6 +451,8 @@ type checkItem struct {
 	details []string
 	// url is where the check is opened, if anywhere
 	url string
+	// check is the check as plugins see it, which may open it
+	check plugins.Check
 }
 
 // checkItems lists the checks of the PR's last commit in the order they're
@@ -521,6 +524,11 @@ func (m *Model) checkItems() []checkItem {
 			if item.url == "" {
 				item.url = string(checkRun.Url)
 			}
+			state := string(checkRun.Status)
+			if checkRun.Status == "COMPLETED" && checkRun.Conclusion != "" {
+				state = string(checkRun.Conclusion)
+			}
+			item.check = plugins.Check{Name: checkName, URL: item.url, State: state}
 		case "StatusContext":
 			statusContext := node.StatusContext
 			category, item.glyph = m.renderStatusContextConclusion(statusContext)
@@ -530,6 +538,13 @@ func (m *Model) checkItems() []checkItem {
 			item.details = statusContextDetails(statusContext)
 			item.when = statusContext.CreatedAt
 			item.url = string(statusContext.TargetUrl)
+			item.check = plugins.Check{
+				Name:            checkName,
+				URL:             item.url,
+				State:           string(statusContext.State),
+				IsStatusContext: true,
+				Description:     string(statusContext.Description),
+			}
 		}
 
 		reportedChecks[checkName] = true
@@ -558,6 +573,7 @@ func (m *Model) checkItems() []checkItem {
 					glyph:   m.ctx.Styles.Common.WaitingGlyph,
 					name:    contextName,
 					details: []string{"Required, but hasn't been reported yet"},
+					check:   plugins.Check{Name: contextName, State: "EXPECTED", Required: true},
 				})
 			}
 		}

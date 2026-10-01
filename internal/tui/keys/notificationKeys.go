@@ -25,6 +25,7 @@ type NotificationKeyMap struct {
 	ReplyToComment       key.Binding
 	ViewCommitFiles      key.Binding
 	OpenCheck            key.Binding
+	ActivateItem         key.Binding
 	ContinueDraft        key.Binding
 	DiscardDraft         key.Binding
 	NextMatch            key.Binding
@@ -95,6 +96,12 @@ var NotificationKeys = NotificationKeyMap{
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "open check in browser"),
 	),
+	// Only while an item of a plugin's tab is focused in an open
+	// notification's PR, e.g. a button loading more tests
+	ActivateItem: key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "act on focused item"),
+	),
 	// Only while a comment draft is detached from in an open notification
 	ContinueDraft: key.NewBinding(
 		key.WithKeys("i"),
@@ -132,6 +139,7 @@ func NotificationFullHelp() []key.Binding {
 		NotificationKeys.ReplyToComment,
 		NotificationKeys.ViewCommitFiles,
 		NotificationKeys.OpenCheck,
+		NotificationKeys.ActivateItem,
 		NotificationKeys.ContinueDraft,
 		NotificationKeys.DiscardDraft,
 		NotificationKeys.NextMatch,
@@ -194,6 +202,8 @@ func rebindNotificationKeys(keys []config.Keybinding) error {
 			key = &NotificationKeys.ViewCommitFiles
 		case "openCheck":
 			key = &NotificationKeys.OpenCheck
+		case "activateItem":
+			key = &NotificationKeys.ActivateItem
 		case "continueDraft":
 			key = &NotificationKeys.ContinueDraft
 		case "discardDraft":

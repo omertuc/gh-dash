@@ -367,7 +367,11 @@ func (c *Controller) LineFromBottom() int {
 }
 
 func (c *Controller) clearRelevantCache() {
-	switch c.fzfSelect.Source.(type) {
+	src := c.fzfSelect.Source
+	if cmds, ok := src.(*fuzzyselect.CommandSource); ok {
+		src = cmds.Fallback
+	}
+	switch src.(type) {
 	case *fuzzyselect.UserMentionSource:
 		if c.repo.NameWithOwner != "" {
 			data.ClearRepoUserCache(c.repo.NameWithOwner)
@@ -393,17 +397,27 @@ func (c *Controller) Filter() {
 
 func (c *Controller) ShowCompletions() {
 	inputValue := c.inputBox.Value()
-	ctx := c.fzfSelect.Source.ExtractContext(
-		inputValue,
-		c.inputBox.GetAbsoluteCursorPosition(),
-	)
+	cursorPos := c.inputBox.GetAbsoluteCursorPosition()
+	ctx := c.fzfSelect.Source.ExtractContext(inputValue, cursorPos)
+
+	src := c.fzfSelect.Source
+	if cmds, ok := src.(*fuzzyselect.CommandSource); ok {
+		// What's suggested depends on where the cursor is, so what was
+		// suggested before may be the wrong kind, e.g. commands for a mention
+		c.Filter()
+		if cmds.InCommand(inputValue, cursorPos) {
+			c.fzfSelect.Show()
+			return
+		}
+		src = cmds.Fallback
+	}
 
 	if c.hideOnEmpty && !c.fzfSelect.HasSuggestions() {
 		return
 	}
 
 	lines := c.inputBox.Lines()
-	switch src := c.fzfSelect.Source.(type) {
+	switch src := src.(type) {
 	case *fuzzyselect.UserMentionSource:
 		if !src.WithAtSymbol {
 			c.fzfSelect.Show()

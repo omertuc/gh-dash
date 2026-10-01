@@ -98,6 +98,8 @@ func (m *Model) onMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	if line := m.sidebar.ContentLineAt(msg); line >= 0 {
 		if m.sidebar.FocusLine(line) {
 			m.syncFocusedCommit(false)
+			// Clicking a button of a plugin's tab presses it
+			return m.clickPluginItem()
 		}
 		return nil
 	}

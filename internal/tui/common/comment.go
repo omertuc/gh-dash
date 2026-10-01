@@ -32,12 +32,15 @@ type CommentAnchor struct {
 	// Check is set when the anchor is a check rather than a comment: the
 	// index of the check in the PR's checks as they're listed
 	Check *int
+	// Plugin is set when the anchor is an item of a plugin's view, e.g. a
+	// test of a CI job: the index of the item as the view listed it
+	Plugin *int
 }
 
 // IsComment reports whether the anchor is a comment, rather than e.g. a
 // commit or a check.
 func (a CommentAnchor) IsComment() bool {
-	return a.Commit == nil && a.Check == nil
+	return a.Commit == nil && a.Check == nil && a.Plugin == nil
 }
 
 // QuoteReply quotes a comment's markdown the way GitHub's "Quote reply"

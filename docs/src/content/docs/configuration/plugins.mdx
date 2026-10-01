@@ -1,0 +1,81 @@
+---
+title: Plugins
+---
+
+Plugins add features for particular workflows, like working with PRs managed by
+[Prow](https://docs.prow.k8s.io). They're built into `gh-dash`, but stay off until
+you opt into them with the `plugins` setting:
+
+```yaml
+plugins:
+  prow:
+    enabled: true
+    options:
+      pageSize: 50
+```
+
+Each key under `plugins` is a plugin's name, with:
+
+- `enabled`: whether the plugin is on. Plugins are off unless enabled.
+- `options`: the plugin's own settings, described below.
+
+An unknown plugin name or invalid options are reported when `gh-dash` starts, and the
+other plugins are still enabled.
+
+## What plugins can do
+
+Plugins can hook into these parts of `gh-dash`:
+
+- **Comment commands**: suggest commands, e.g. `/lgtm`, while writing a comment on a
+  PR. They're suggested on lines starting with `/`, while `@` still suggests people to
+  mention.
+- **Overview panels**: show boxes of information in a PR's overview, e.g. who approved
+  it.
+- **Check views**: open some of a PR's checks in a tab of their own, rather than in the
+  browser, e.g. to browse a CI job's test results. With a notification's PR open, focus a
+  check in the Checks tab and press <kbd>enter</kbd>. The focused check's hint says when a
+  plugin opens it, e.g. "enter view tests". In the check's tab, <kbd>j</kbd>/<kbd>k</kbd>
+  move between its items and <kbd>enter</kbd> (the `activateItem` key) or a click acts on
+  the focused one.
+
+## Prow
+
+For repos whose PRs Prow manages, like Kubernetes' and OpenShift's. It's active on PRs
+whose checks link to Prow jobs, that Prow commented on or that have Prow's labels.
+
+- **Commands**: suggests Prow's commands while writing a comment, like `/lgtm`,
+  `/approve`, `/hold`, `/hold cancel`, `/retest` and `/ok-to-test`, along with `/test`
+  for each of the PR's jobs and `/override` for each of its statuses, failing ones first.
+  Jobs Prow lists in its comments, e.g. its failed tests report, are suggested too.
+- **Approvals**: a panel in the overview shows who LGTM'd the PR, who approved it and
+  which `OWNERS` files still need approving and by whom, as summarized by Prow's approval
+  comment, along with what blocks merging, like `do-not-merge/hold` or `needs-rebase`.
+- **Test results**: opening a Prow job's check lists its tests, from the job's junit
+  files, by how they went: failed, flaky (failed, then passed on a retry), passed and
+  skipped. Failed tests are listed right away, while the rest are listed a page at a time
+  as you ask for them with "Load", since jobs may run thousands of tests. Focusing a test
+  shows why it failed: its message and the end of its output.
+
+  Test results are read from the job's artifacts in Google Cloud Storage, which only works
+  when they're public. Jobs whose artifacts aren't can still be opened in the browser.
+
+### Options
+
+| Option          | Default                          | Description                                                     |
+| --------------- | -------------------------------- | --------------------------------------------------------------- |
+| `pageSize`      | `50`                             | How many tests are listed at a time                             |
+| `artifactsUrl`  | `https://storage.googleapis.com` | Where jobs' artifacts are read from, a GCS compatible API       |
+| `extraCommands` | none                             | More commands to suggest, e.g. ones only your repos' Prow knows |
+
+```yaml
+plugins:
+  prow:
+    enabled: true
+    options:
+      pageSize: 100
+      extraCommands:
+        - command: /jira refresh
+          description: Refresh the linked Jira issue
+        - command: /cherry-pick release-4.18
+          description: Cherry-pick onto release-4.18
+```

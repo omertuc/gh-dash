@@ -30,6 +30,7 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/config"
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
 	"github.com/dlvhdr/gh-dash/v4/internal/git"
+	"github.com/dlvhdr/gh-dash/v4/internal/plugins"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/branch"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/branchsidebar"
@@ -358,6 +359,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// With a commit focused in an open notification's PR, show its files
 		case key.Matches(msg, keys.NotificationKeys.ViewCommitFiles) && m.hasFocusedCommit():
 			return m, m.viewFocusedCommitFiles()
+
+		// With an item of a plugin's tab focused in an open notification's PR,
+		// act on it, e.g. load more of a CI job's tests
+		case key.Matches(msg, keys.NotificationKeys.ActivateItem) && m.hasFocusedPluginItem():
+			i, _ := m.focusedPluginItem()
+			return m, m.activatePluginItem(i)
 
 		// With a check focused in an open notification's PR, open it
 		case key.Matches(msg, keys.NotificationKeys.OpenCheck) && m.hasFocusedCheck():
@@ -867,6 +874,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case initMsg:
 		m.ctx.Config = &msg.Config
+		if err := plugins.Configure(msg.Config.Plugins); err != nil {
+			log.Error("Failed configuring plugins", "err", err)
+			m.ctx.Error = err
+		}
 		m.ctx.RepoUrl = msg.RepoUrl
 		m.ctx.Theme = theme.ParseTheme(m.ctx.Config)
 		m.ctx.Styles = context.InitStyles(m.ctx.Theme)
@@ -918,6 +929,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		fetchSectionsCmds := m.fetchAllViewSections()
 		m.updateTabs()
 		cmds = append(cmds, fetchSectionsCmds, m.doRefreshAtInterval())
+
+	case prview.PluginViewMsg:
+		cmds = append(cmds, m.onPluginViewMsg(msg))
+
+	case plugins.OpenURLMsg:
+		cmds = append(cmds, m.openUrlInBrowser(msg.URL))
 
 	case prview.CommitFilesMsg:
 		if msg.Err != nil {
@@ -1628,8 +1645,12 @@ func (m *Model) updateSidebarHints() {
 		m.sidebar.SetFocusLabel("commit")
 	case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
 		m.prView.IsChecksTab():
-		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.OpenCheck) + " open")
+		m.sidebar.SetFocusHint(m.checkFocusHint())
 		m.sidebar.SetFocusLabel("check")
+	case m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+		m.prView.IsPluginTab():
+		m.sidebar.SetFocusHint(m.pluginFocusHint())
+		m.sidebar.SetFocusLabel("item")
 	case m.isNotificationSubjectShown():
 		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ReplyToComment) + " reply")
 		m.sidebar.SetFocusLabel("comment")
@@ -1920,6 +1941,10 @@ func (m *Model) syncFocusedCommit(fromBelow bool) {
 		m.syncFocusedCheck(fromBelow)
 		return
 	}
+	if m.prView.IsPluginTab() {
+		m.syncFocusedPluginItem(fromBelow)
+		return
+	}
 	if !m.isNotificationSubjectShown() || m.notificationView.GetSubjectPR() == nil ||
 		!m.prView.IsCommitsTab() {
 		return
@@ -2001,6 +2026,9 @@ func (m *Model) checkAnchor(check int) int {
 // openFocusedCheck opens the check focused in an open notification's PR in
 // the browser, e.g. its job's log.
 func (m *Model) openFocusedCheck() tea.Cmd {
+	if cmd, ok := m.openFocusedCheckInPlugin(); ok {
+		return cmd
+	}
 	check, ok := m.focusedCheck()
 	if !ok {
 		return nil

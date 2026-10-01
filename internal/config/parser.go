@@ -331,6 +331,16 @@ type Config struct {
 	ShowAuthorIcons          bool                         `yaml:"showAuthorIcons,omitempty"`
 	SmartFilteringAtLaunch   bool                         `yaml:"smartFilteringAtLaunch"                         default:"true"`
 	IncludeReadNotifications bool                         `yaml:"includeReadNotifications"                       default:"true"`
+	// Plugins are opted into by name, e.g. "prow", and are off unless
+	// enabled
+	Plugins map[string]PluginConfig `yaml:"plugins,omitempty"`
+}
+
+// PluginConfig opts into a plugin and configures it.
+type PluginConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Options are the plugin's own settings, which it documents
+	Options map[string]any `yaml:"options,omitempty"`
 }
 
 type configError struct {

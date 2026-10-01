@@ -51,7 +51,7 @@ type EnrichedPullRequestData struct {
 	HeadRef struct {
 		Name string
 	}
-	Labels             PRLabels  `graphql:"labels(first: 6)"`
+	Labels             PRLabels  `graphql:"labels(first: 30)"`
 	Assignees          Assignees `graphql:"assignees(first: 3)"`
 	Repository         Repository
 	Commits            LastCommitWithStatusChecks `graphql:"commits(last: 1)"`

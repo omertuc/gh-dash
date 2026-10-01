@@ -52,6 +52,9 @@ type Model struct {
 	// commitFiles narrows the files tab to a commit's files, or is nil to show
 	// all of the PR's files
 	commitFiles *commitFiles
+	// pluginTab is a plugin's view of a check shown in a tab after the
+	// others, e.g. a CI job's tests, or nil when none was opened
+	pluginTab *pluginTab
 }
 
 // commitFiles are the files changed by a commit, shown in the files tab.
@@ -78,6 +81,8 @@ const (
 	commitsTab
 	checksTab
 	filesTab
+	// pluginViewTab is shown only once a plugin opened a check in it
+	pluginViewTab
 )
 
 func NewModel(ctx *context.ProgramContext) Model {
@@ -184,6 +189,10 @@ func (m Model) ViewBody() string {
 func (m Model) ViewBodyWithAnchors() (string, []common.CommentAnchor) {
 	if !m.hasData() {
 		return "", nil
+	}
+
+	if m.carousel.Cursor() == pluginViewTab && m.pluginTab != nil {
+		return m.viewPluginTab()
 	}
 
 	if m.carousel.Cursor() == activityTab {
@@ -392,6 +401,11 @@ func (m *Model) viewOverviewTab() string {
 	reviewers := m.renderRequestedReviewers()
 	if reviewers != "" {
 		body.WriteString(reviewers)
+		body.WriteString("\n\n")
+	}
+
+	if panels := m.renderPluginPanels(); panels != "" {
+		body.WriteString(panels)
 		body.WriteString("\n\n")
 	}
 
@@ -764,6 +778,7 @@ func (m *Model) SetRow(d *prrow.Data) {
 		m.expandedCommit = ""
 		m.expandedCheck = ""
 		m.commitFiles = nil
+		m.pluginTab = nil
 		m.syncTabs()
 	}
 	if d == nil {
@@ -850,7 +865,7 @@ func (m *Model) StartComment(text string, detachable bool) tea.Cmd {
 		return nil
 	}
 
-	m.editor.SetAutocompleteSource(&fuzzyselect.UserMentionSource{WithAtSymbol: true})
+	m.editor.SetAutocompleteSource(m.commentSource())
 	cmd := m.editor.Enter(cmpcontroller.EnterOptions{
 		InitialValue:                     text,
 		Mode:                             cmpcontroller.ModeComment,
@@ -1025,7 +1040,7 @@ func (m *Model) PrevTab() {
 }
 
 func (m *Model) NextTab() {
-	m.setTab(min(len(tabs)-1, m.carousel.Cursor()+1))
+	m.setTab(min(len(m.carousel.Items())-1, m.carousel.Cursor()+1))
 }
 
 // SelectTabAt selects the tab under the mouse. It reports whether the tab
@@ -1055,6 +1070,9 @@ func (m *Model) syncTabs() {
 	items := slices.Clone(tabs)
 	if m.commitFiles != nil {
 		items[filesTab] += " (" + m.commitFiles.abbreviatedOid + ")"
+	}
+	if m.pluginTab != nil {
+		items = append(items, m.pluginTab.view.Title())
 	}
 	if slices.Equal(items, m.carousel.Items()) {
 		return
