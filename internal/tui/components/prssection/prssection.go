@@ -178,6 +178,10 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 				currPr.Enriched.Comments.Nodes = tasks.WithoutComment(
 					currPr.Enriched.Comments.Nodes, *msg.RemovedComment)
 			}
+			if msg.DeletedCommentId != "" {
+				currPr.Enriched.Comments.Nodes = tasks.WithoutCommentId(
+					currPr.Enriched.Comments.Nodes, msg.DeletedCommentId)
+			}
 			if msg.AddedAssignees != nil {
 				currPr.Primary.Assignees.Nodes = addAssignees(
 					currPr.Primary.Assignees.Nodes, msg.AddedAssignees.Nodes)

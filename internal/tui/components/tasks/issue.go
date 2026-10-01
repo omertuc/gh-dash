@@ -25,6 +25,8 @@ type UpdateIssueMsg struct {
 	// RemovedComment is a pending comment, added by NewComment, that failed
 	// to post
 	RemovedComment *data.IssueComment
+	// DeletedCommentId is the id of a comment that was deleted
+	DeletedCommentId string
 	// CommentedOn is the issue NewComment or PostedComment is on
 	CommentedOn data.RowData
 }
@@ -203,6 +205,29 @@ func CommentOnIssue(
 				CommentedOn:   issue,
 				PostedComment: &comment,
 			}
+		},
+	})
+}
+
+// DeleteIssueComment deletes the issue's comment with the given id
+func DeleteIssueComment(
+	ctx *context.ProgramContext,
+	section SectionIdentifier,
+	issue data.RowData,
+	commentId string,
+) tea.Cmd {
+	issueNumber := issue.GetNumber()
+	return fireTask(ctx, GitHubTask{
+		Id:           fmt.Sprintf("issue_delete_comment_%s", commentId),
+		Args:         deleteCommentArgs(commentId),
+		Section:      section,
+		StartText:    fmt.Sprintf("Deleting comment on issue #%d", issueNumber),
+		FinishedText: fmt.Sprintf("Deleted comment on issue #%d", issueNumber),
+		Msg: func(c *exec.Cmd, err error) tea.Msg {
+			if err != nil {
+				return nil
+			}
+			return UpdateIssueMsg{IssueNumber: issueNumber, DeletedCommentId: commentId}
 		},
 	})
 }

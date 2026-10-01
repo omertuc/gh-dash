@@ -84,6 +84,9 @@ type Model struct {
 	drafts map[string]string
 	// confirmingDraftDiscard is whether discarding a draft awaits a y/n
 	confirmingDraftDiscard bool
+	// confirmingCommentDelete is the id of the focused comment whose
+	// deletion awaits a y/n
+	confirmingCommentDelete string
 
 	// watchingDoneStore is set once the done store is being watched for
 	// outside changes.
@@ -296,6 +299,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Confirm deleting the focused comment
+		if m.confirmingCommentDelete != "" {
+			id := m.confirmingCommentDelete
+			m.confirmingCommentDelete = ""
+			if msg.String() == "y" || msg.String() == "Y" {
+				return m, m.deleteFocusedComment(id)
+			}
+			return m, nil
+		}
+
 		// While the help is open, q and esc close it instead of quitting or
 		// going back. Ctrl+c still quits.
 		if m.footer.ShowAll && msg.String() != "ctrl+c" &&
@@ -355,6 +368,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// With a comment focused in an open notification, reply to it
 		case key.Matches(msg, keys.NotificationKeys.ReplyToComment) && m.hasFocusedComment():
 			return m, m.replyToFocusedComment()
+
+		// With a comment of the user's own focused in an open notification,
+		// delete it once confirmed
+		case key.Matches(msg, keys.NotificationKeys.DeleteComment) && m.canDeleteFocusedComment():
+			comment, _ := m.focusedComment()
+			m.confirmingCommentDelete = comment.Id
+			return m, nil
 
 		// With a commit focused in an open notification's PR, show its files
 		case key.Matches(msg, keys.NotificationKeys.ViewCommitFiles) && m.hasFocusedCommit():
@@ -1652,7 +1672,7 @@ func (m *Model) updateSidebarHints() {
 		m.sidebar.SetFocusHint(m.pluginFocusHint())
 		m.sidebar.SetFocusLabel("item")
 	case m.isNotificationSubjectShown():
-		m.sidebar.SetFocusHint(keys.HintKeys(keys.NotificationKeys.ReplyToComment) + " reply")
+		m.sidebar.SetFocusHint(m.commentFocusHint())
 		m.sidebar.SetFocusLabel("comment")
 	default:
 		m.sidebar.SetFocusHint("")
@@ -2094,6 +2114,44 @@ func (m *Model) replyToFocusedComment() tea.Cmd {
 	return m.openSidebarForInput(func(bool) tea.Cmd { return m.issueSidebar.StartComment(quote, true) })
 }
 
+// canDeleteFocusedComment reports whether the comment focused in an open
+// notification is one of the user's own that's already posted.
+func (m *Model) canDeleteFocusedComment() bool {
+	comment, ok := m.focusedComment()
+	return ok && comment.Id != "" && m.ctx.User != "" && comment.Author == m.ctx.User
+}
+
+// commentFocusHint is shown on the comment focused in an open notification.
+func (m *Model) commentFocusHint() string {
+	if comment, ok := m.focusedComment(); ok && m.confirmingCommentDelete != "" &&
+		comment.Id == m.confirmingCommentDelete {
+		return "delete it? y/n"
+	}
+	hint := keys.HintKeys(keys.NotificationKeys.ReplyToComment) + " reply"
+	if m.canDeleteFocusedComment() {
+		hint += " · " + keys.HintKeys(keys.NotificationKeys.DeleteComment) + " delete"
+	}
+	return hint
+}
+
+// deleteFocusedComment deletes the comment focused in an open notification,
+// as long as it's still the one with the given id, i.e. the one whose
+// deletion was confirmed.
+func (m *Model) deleteFocusedComment(id string) tea.Cmd {
+	comment, ok := m.focusedComment()
+	if !ok || comment.Id != id || !m.canDeleteFocusedComment() {
+		return nil
+	}
+	sid := tasks.SectionIdentifier{Id: m.currSectionId, Type: notificationssection.SectionType}
+	if pr := m.notificationView.GetSubjectPR(); pr != nil {
+		return tasks.DeletePRComment(m.ctx, sid, pr, id)
+	}
+	if issue := m.notificationView.GetSubjectIssue(); issue != nil {
+		return tasks.DeleteIssueComment(m.ctx, sid, issue, id)
+	}
+	return nil
+}
+
 // refreshNotificationSubject refetches the open notification's PR/Issue,
 // keeping the tab, scroll position and any draft
 func (m *Model) refreshNotificationSubject() tea.Cmd {
@@ -2184,12 +2242,19 @@ func (m *Model) updateNotificationSubject(msg tea.Msg) {
 			pr.Enriched.Comments.Nodes = tasks.WithoutComment(
 				pr.Enriched.Comments.Nodes, *msg.RemovedComment)
 		}
+		if pr != nil && pr.Primary.Number == msg.PrNumber && msg.DeletedCommentId != "" {
+			pr.Enriched.Comments.Nodes = tasks.WithoutCommentId(
+				pr.Enriched.Comments.Nodes, msg.DeletedCommentId)
+		}
 	case tasks.UpdateIssueMsg:
 		if issue != nil && issue.Number == msg.IssueNumber && msg.NewComment != nil {
 			issue.Comments.Nodes = append(issue.Comments.Nodes, *msg.NewComment)
 		}
 		if issue != nil && issue.Number == msg.IssueNumber && msg.RemovedComment != nil {
 			issue.Comments.Nodes = tasks.WithoutComment(issue.Comments.Nodes, *msg.RemovedComment)
+		}
+		if issue != nil && issue.Number == msg.IssueNumber && msg.DeletedCommentId != "" {
+			issue.Comments.Nodes = tasks.WithoutCommentId(issue.Comments.Nodes, msg.DeletedCommentId)
 		}
 	case notificationSubjectRefreshedMsg:
 		// It's stale if another notification has been opened since

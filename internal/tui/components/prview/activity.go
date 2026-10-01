@@ -19,6 +19,8 @@ type RenderedActivity struct {
 	RenderedString string
 	Author         string
 	Body           string
+	// Id is set for a comment that can be deleted
+	Id string
 	// Event is set for timeline events, e.g. commits and force pushes, which
 	// are rendered along with the events next to them
 	Event *data.TimelineItem
@@ -70,6 +72,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 
 	for _, c := range m.pr.Data.Enriched.Comments.Nodes {
 		comments = append(comments, comment{
+			Id:        c.Id,
 			Author:    c.Author.Login,
 			Body:      c.Body,
 			CreatedAt: activityTime(c.CreatedAt, c.UpdatedAt),
@@ -88,6 +91,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 			RenderedString: renderedComment,
 			Author:         comment.Author,
 			Body:           comment.Body,
+			Id:             comment.Id,
 		})
 	}
 
@@ -142,6 +146,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 				Line:   line,
 				Author: activity.Author,
 				Body:   activity.Body,
+				Id:     activity.Id,
 			})
 			line += lipgloss.Height(activity.RenderedString)
 		}
@@ -157,6 +162,9 @@ func renderEmptyState() string {
 }
 
 type comment struct {
+	// Id is set for a PR's comment, which can be deleted, rather than a
+	// review's
+	Id        string
 	Author    string
 	CreatedAt time.Time
 	UpdatedAt time.Time

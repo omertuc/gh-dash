@@ -23,6 +23,7 @@ type NotificationKeyMap struct {
 	SwitchToPRs          key.Binding
 	ToggleSmartFiltering key.Binding
 	ReplyToComment       key.Binding
+	DeleteComment        key.Binding
 	ViewCommitFiles      key.Binding
 	OpenCheck            key.Binding
 	ActivateItem         key.Binding
@@ -86,6 +87,12 @@ var NotificationKeys = NotificationKeyMap{
 		key.WithKeys(">"),
 		key.WithHelp(">", "reply to comment"),
 	),
+	// Only while a comment of the user's own is focused in an open
+	// notification
+	DeleteComment: key.NewBinding(
+		key.WithKeys("backspace"),
+		key.WithHelp("backspace", "delete comment"),
+	),
 	// Only while a commit is focused in an open notification's PR
 	ViewCommitFiles: key.NewBinding(
 		key.WithKeys("enter"),
@@ -137,6 +144,7 @@ func NotificationFullHelp() []key.Binding {
 		NotificationKeys.SwitchToPRs,
 		NotificationKeys.ToggleSmartFiltering,
 		NotificationKeys.ReplyToComment,
+		NotificationKeys.DeleteComment,
 		NotificationKeys.ViewCommitFiles,
 		NotificationKeys.OpenCheck,
 		NotificationKeys.ActivateItem,
@@ -198,6 +206,8 @@ func rebindNotificationKeys(keys []config.Keybinding) error {
 			key = &NotificationKeys.ToggleSmartFiltering
 		case "replyToComment":
 			key = &NotificationKeys.ReplyToComment
+		case "deleteComment":
+			key = &NotificationKeys.DeleteComment
 		case "viewCommitFiles":
 			key = &NotificationKeys.ViewCommitFiles
 		case "openCheck":

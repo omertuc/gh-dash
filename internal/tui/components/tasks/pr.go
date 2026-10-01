@@ -35,6 +35,8 @@ type UpdatePRMsg struct {
 	// RemovedComment is a pending comment, added by NewComment, that failed
 	// to post
 	RemovedComment *data.Comment
+	// DeletedCommentId is the id of a comment that was deleted
+	DeletedCommentId string
 	// CommentedOn is the PR NewComment or PostedComment is on
 	CommentedOn data.RowData
 }
@@ -415,6 +417,29 @@ func CommentOnPR(
 				CommentedOn:   pr,
 				PostedComment: &comment,
 			}
+		},
+	})
+}
+
+// DeletePRComment deletes the PR's comment with the given id
+func DeletePRComment(
+	ctx *context.ProgramContext,
+	section SectionIdentifier,
+	pr data.RowData,
+	commentId string,
+) tea.Cmd {
+	prNumber := pr.GetNumber()
+	return fireTask(ctx, GitHubTask{
+		Id:           fmt.Sprintf("pr_delete_comment_%s", commentId),
+		Args:         deleteCommentArgs(commentId),
+		Section:      section,
+		StartText:    fmt.Sprintf("Deleting comment on PR #%d", prNumber),
+		FinishedText: fmt.Sprintf("Deleted comment on PR #%d", prNumber),
+		Msg: func(c *exec.Cmd, err error) tea.Msg {
+			if err != nil {
+				return nil
+			}
+			return UpdatePRMsg{PrNumber: prNumber, DeletedCommentId: commentId}
 		},
 	})
 }

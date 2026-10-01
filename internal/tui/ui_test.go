@@ -2896,6 +2896,109 @@ func TestNotificationView_SlashSearchesComments(t *testing.T) {
 	require.Nil(t, m.notificationView.GetSubjectPR(), "a second esc should go back")
 }
 
+func TestNotificationView_DeleteOwnComment(t *testing.T) {
+	cfg, err := config.ParseConfig(config.Location{
+		ConfigFlag:       "../config/testdata/test-config.yml",
+		SkipGlobalConfig: true,
+	})
+	require.NoError(t, err)
+
+	ctx := &context.ProgramContext{
+		Config:              &cfg,
+		View:                config.NotificationsView,
+		MainContentHeight:   40,
+		DynamicPreviewWidth: 64,
+		ScreenWidth:         140,
+		ScreenHeight:        50,
+		User:                "me",
+	}
+	ctx.Theme = theme.ParseTheme(ctx.Config)
+	ctx.Styles = context.InitStyles(ctx.Theme)
+
+	sidebarModel := sidebar.NewModel()
+	sidebarModel.IsOpen = true
+	sidebarModel.UpdateProgramContext(ctx)
+
+	m := Model{
+		ctx:              ctx,
+		keys:             keys.Keys,
+		prView:           prview.NewModel(ctx),
+		sidebar:          sidebarModel,
+		issueSidebar:     issueview.NewModel(ctx),
+		notificationView: notificationview.NewModel(ctx),
+		footer:           footer.NewModel(ctx),
+		tasks:            map[string]context.Task{},
+	}
+	ctx.StartTask = func(task context.Task) tea.Cmd {
+		m.tasks[task.Id] = task
+		return nil
+	}
+
+	notifications := notificationssection.NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
+	notifications.Notifications = []notificationrow.Data{
+		{Notification: data.NotificationData{Id: "test-notification-id"}},
+	}
+	notifications.Table.SetRows(notifications.BuildRows())
+	m.notifications = []section.Section{&notifications}
+
+	prData := data.PullRequestData{Number: 7, Title: "A PR", Url: "https://github.com/o/r/pull/7"}
+	enriched := data.EnrichedPullRequestData{}
+	for i, c := range []struct{ id, author, body string }{
+		{"c1", "alice", "alice's comment"},
+		{"c2", "me", "my comment"},
+		// Still being posted, so it has no id yet
+		{"", "me", "my pending comment"},
+	} {
+		comment := data.Comment{Id: c.id, Body: c.body, UpdatedAt: time.Now().Add(time.Duration(i) * time.Minute)}
+		comment.Author.Login = c.author
+		enriched.Comments.Nodes = append(enriched.Comments.Nodes, comment)
+	}
+	pr := &prrow.Data{Primary: &prData, Enriched: enriched, IsEnriched: true}
+	m.notificationView.SetSubjectPR(pr, "test-notification-id")
+	m.prView.SetRow(pr)
+	m.prView.SetWidth(60)
+	m.prView.GoToActivityTab()
+	m.setSidebarPRContent()
+
+	backspace := tea.KeyPressMsg{Code: tea.KeyBackspace}
+
+	m.sidebar.FocusAnchor(0, false)
+	require.Equal(t, "> reply", m.commentFocusHint(), "someone else's comment can't be deleted")
+	m.Update(backspace)
+	require.Empty(t, m.confirmingCommentDelete)
+
+	m.sidebar.FocusAnchor(2, false)
+	require.Equal(t, "> reply", m.commentFocusHint(), "a comment still being posted can't be deleted")
+
+	m.sidebar.FocusAnchor(1, false)
+	require.Equal(t, "> reply · Backspace delete", m.commentFocusHint())
+
+	// Anything but y keeps the comment
+	m.Update(backspace)
+	require.Equal(t, "delete it? y/n", m.commentFocusHint())
+	m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	require.Equal(t, "> reply · Backspace delete", m.commentFocusHint())
+	require.Empty(t, m.tasks)
+
+	m.Update(backspace)
+	m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	require.Contains(t, m.tasks, "pr_delete_comment_c2", "y should delete the comment")
+
+	m.Update(constants.TaskFinishedMsg{
+		TaskId: "pr_delete_comment_c2",
+		Msg:    tasks.UpdatePRMsg{PrNumber: 7, DeletedCommentId: "c2"},
+	})
+	m.sidebar.ScrollToTop()
+	view := ansi.Strip(m.sidebar.View())
+	require.Contains(t, view, "alice's comment")
+	require.NotContains(t, view, "my comment", "the deleted comment shouldn't be shown")
+	var bodies []string
+	for _, c := range m.notificationView.GetSubjectPR().Enriched.Comments.Nodes {
+		bodies = append(bodies, c.Body)
+	}
+	require.Equal(t, []string{"alice's comment", "my pending comment"}, bodies)
+}
+
 func TestNotificationView_OpenSubjectFillsScreen(t *testing.T) {
 	cfg, err := config.ParseConfig(config.Location{
 		ConfigFlag:       "../config/testdata/test-config.yml",

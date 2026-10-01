@@ -38,11 +38,17 @@ type IssueComments struct {
 }
 
 type IssueComment struct {
+	// Id is empty for a comment that's still being posted
+	Id     string
 	Author struct {
 		Login string
 	}
 	Body      string
 	UpdatedAt time.Time
+}
+
+func (c IssueComment) GetId() string {
+	return c.Id
 }
 
 type IssueReactions struct {

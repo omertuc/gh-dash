@@ -26,6 +26,9 @@ type CommentAnchor struct {
 	Author string
 	// Body is the comment's markdown
 	Body string
+	// Id is set for a comment that can be deleted, i.e. a PR's or Issue's
+	// comment, rather than a review, that's already posted
+	Id string
 	// Commit is set when the anchor is a commit rather than a comment: the
 	// index of the commit in the PR's commits
 	Commit *int

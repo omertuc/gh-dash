@@ -17,6 +17,7 @@ type RenderedActivity struct {
 	RenderedString string
 	Author         string
 	Body           string
+	Id             string
 }
 
 func (m *Model) renderActivity() string {
@@ -41,6 +42,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 			RenderedString: renderedComment,
 			Author:         comment.Author.Login,
 			Body:           comment.Body,
+			Id:             comment.Id,
 		})
 	}
 
@@ -63,6 +65,7 @@ func (m *Model) renderActivityWithAnchors() (string, []common.CommentAnchor) {
 				Line:   line,
 				Author: activity.Author,
 				Body:   activity.Body,
+				Id:     activity.Id,
 			})
 			line += lipgloss.Height(activity.RenderedString)
 		}

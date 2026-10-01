@@ -264,12 +264,18 @@ type Commits struct {
 }
 
 type Comment struct {
+	// Id is empty for a comment that's still being posted
+	Id     string
 	Author struct {
 		Login string
 	}
 	Body      string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+func (c Comment) GetId() string {
+	return c.Id
 }
 
 type ReviewComment struct {
