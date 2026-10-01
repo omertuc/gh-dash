@@ -74,7 +74,7 @@ func (m *Model) loadCachedRows() {
 	doneStore := data.GetDoneStore()
 	notifications := make([]notificationrow.Data, 0, len(cache.Notifications))
 	for _, n := range cache.Notifications[:min(len(cache.Notifications), m.numCachedRows())] {
-		if !doneStore.IsDone(n.GetId(), n.Notification.UpdatedAt) {
+		if !doneStore.IsNotificationDone(n.Notification) {
 			n.HasDraft = false
 			notifications = append(notifications, n)
 		}

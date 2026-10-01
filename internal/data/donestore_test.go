@@ -63,6 +63,40 @@ func TestDoneStore(t *testing.T) {
 		}
 	})
 
+	t.Run("IsNotificationDone ignores updates that left the thread read", func(t *testing.T) {
+		store, _ := newTestDoneStore(t)
+		store.MarkDone("id1", baseTime)
+		later := baseTime.Add(time.Hour)
+		readAfterDone := baseTime.Add(30 * time.Minute)
+		readBeforeDone := baseTime.Add(-30 * time.Minute)
+
+		cases := []struct {
+			name string
+			n    NotificationData
+			want bool
+		}{
+			{"not updated", NotificationData{Id: "id1", UpdatedAt: baseTime, Unread: true}, true},
+			{"updated, unread", NotificationData{Id: "id1", UpdatedAt: later, Unread: true}, false},
+			{"updated, never read", NotificationData{Id: "id1", UpdatedAt: later}, true},
+			{
+				"updated, read before done",
+				NotificationData{Id: "id1", UpdatedAt: later, LastReadAt: &readBeforeDone},
+				true,
+			},
+			{
+				"updated, read after done",
+				NotificationData{Id: "id1", UpdatedAt: later, LastReadAt: &readAfterDone},
+				false,
+			},
+			{"unknown", NotificationData{Id: "unknown", UpdatedAt: baseTime}, false},
+		}
+		for _, c := range cases {
+			if got := store.IsNotificationDone(c.n); got != c.want {
+				t.Errorf("%s: IsNotificationDone = %v, want %v", c.name, got, c.want)
+			}
+		}
+	})
+
 	t.Run("Remove", func(t *testing.T) {
 		store, _ := newTestDoneStore(t)
 		store.MarkDone("id1", baseTime)

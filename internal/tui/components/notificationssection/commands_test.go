@@ -281,7 +281,7 @@ func TestDoneStoreChangedHidesNewlyDoneRows(t *testing.T) {
 	m := NewModel(0, ctx, config.NotificationsSectionConfig{}, time.Now())
 	m.Notifications = []notificationrow.Data{
 		{Notification: data.NotificationData{Id: "notif-A", UpdatedAt: t1}},
-		{Notification: data.NotificationData{Id: "notif-B", UpdatedAt: t1}},
+		{Notification: data.NotificationData{Id: "notif-B", UpdatedAt: t1, Unread: true}},
 		{Notification: data.NotificationData{Id: "notif-C", UpdatedAt: t1}},
 	}
 	m.TotalCount = len(m.Notifications)
@@ -289,7 +289,7 @@ func TestDoneStoreChangedHidesNewlyDoneRows(t *testing.T) {
 	m.LastItem()
 	m.sessionMarkedDone["notif-D"] = true
 
-	// Done as of an older update, so notif-B stays visible.
+	// Done as of an older update and unread again since, so notif-B stays visible.
 	store.MarkDone("notif-B", t1.Add(-time.Hour))
 	store.MarkDone("notif-C", t1)
 	m.Update(DoneStoreChangedMsg{Undone: []string{"notif-D"}})

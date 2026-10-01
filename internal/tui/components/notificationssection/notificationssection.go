@@ -344,7 +344,7 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 		}
 		doneStore := data.GetDoneStore()
 		kept := slices.DeleteFunc(slices.Clone(m.Notifications), func(n notificationrow.Data) bool {
-			return doneStore.IsDone(n.GetId(), n.Notification.UpdatedAt)
+			return doneStore.IsNotificationDone(n.Notification)
 		})
 		if len(kept) != len(m.Notifications) {
 			m.setNotifications(kept)
@@ -659,7 +659,7 @@ func (m *Model) nearestIndex(prev []notificationrow.Data, curr int) int {
 func (m *Model) applySessionActions(fetched []notificationrow.Data) []notificationrow.Data {
 	doneStore := data.GetDoneStore()
 	fetched = slices.DeleteFunc(fetched, func(n notificationrow.Data) bool {
-		return m.sessionMarkedDone[n.GetId()] || doneStore.IsDone(n.GetId(), n.Notification.UpdatedAt)
+		return m.sessionMarkedDone[n.GetId()] || doneStore.IsNotificationDone(n.Notification)
 	})
 	shownUpdatedAt := make(map[string]time.Time, len(m.Notifications))
 	for _, n := range m.Notifications {
@@ -692,7 +692,7 @@ func (m *Model) keepShown(fetched []notificationrow.Data) []notificationrow.Data
 	for _, n := range m.Notifications {
 		id := n.GetId()
 		if fetchedIds[id] || (id != currId && !m.sessionMarkedRead[id]) ||
-			m.sessionMarkedDone[id] || doneStore.IsDone(id, n.Notification.UpdatedAt) {
+			m.sessionMarkedDone[id] || doneStore.IsNotificationDone(n.Notification) {
 			continue
 		}
 		// Fetched notifications are the most recently updated first
@@ -945,7 +945,7 @@ func (m *Model) FetchNextPageSectionRows() []tea.Cmd {
 			for _, n := range res.Notifications {
 				// Skip notifications marked as done (GitHub API still returns them with all=true)
 				// Check both persistent store and session state
-				if doneStore.IsDone(n.Id, n.UpdatedAt) || sessionMarkedDone[n.Id] {
+				if doneStore.IsNotificationDone(n) || sessionMarkedDone[n.Id] {
 					continue
 				}
 

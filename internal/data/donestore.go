@@ -207,6 +207,25 @@ func (s *DoneStore) IsDone(id string, updatedAt time.Time) bool {
 	return !updatedAt.After(doneAt)
 }
 
+// IsNotificationDone is IsDone, except that a notification updated since it was
+// marked done stays done if GitHub never made it unread again. Activity that
+// isn't meant for the user (e.g. a merge on a thread they unsubscribed from)
+// bumps updated_at without making the thread unread; activity that is (e.g. a
+// mention, which also resubscribes them) makes it unread, and reading it then
+// leaves last_read_at after the done mark, so it keeps showing.
+func (s *DoneStore) IsNotificationDone(n NotificationData) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	doneAt, ok := s.entries[n.Id]
+	if !ok {
+		return false
+	}
+	if !n.UpdatedAt.After(doneAt) {
+		return true
+	}
+	return !n.Unread && (n.LastReadAt == nil || !n.LastReadAt.After(doneAt))
+}
+
 // Remove removes a notification from the done store.
 func (s *DoneStore) Remove(id string) {
 	if s.db != nil {
