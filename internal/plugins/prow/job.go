@@ -19,10 +19,10 @@ import (
 // are listed up front: the rest, of which there may be thousands, are listed
 // a page at a time, as asked for.
 type jobView struct {
-	check   plugins.Check
-	job     jobRef
-	opts    Options
-	fetcher *fetcher
+	check plugins.Check
+	job   jobRef
+	opts  Options
+	cache *resultsCache
 
 	loading bool
 	err     error
@@ -71,12 +71,12 @@ type resultsMsg struct {
 	err     error
 }
 
-func newJobView(check plugins.Check, job jobRef, opts Options) *jobView {
+func newJobView(check plugins.Check, job jobRef, opts Options, cache *resultsCache) *jobView {
 	return &jobView{
-		check:   check,
-		job:     job,
-		opts:    opts,
-		fetcher: newFetcher(opts.ArtifactsURL),
+		check: check,
+		job:   job,
+		opts:  opts,
+		cache: cache,
 	}
 }
 
@@ -89,16 +89,23 @@ func (v *jobView) Title() string {
 	return " " + name
 }
 
+// Init shows the job's results right away when they were prefetched, and
+// otherwise fetches them.
 func (v *jobView) Init() tea.Cmd {
-	return v.fetch()
+	if res, ok := v.cache.peek(v.job); ok {
+		v.Update(resultsMsg{results: res})
+		return nil
+	}
+	return v.fetch(false)
 }
 
-func (v *jobView) fetch() tea.Cmd {
+// fetch fetches the job's results, reusing cached ones unless fresh.
+func (v *jobView) fetch(fresh bool) tea.Cmd {
 	v.loading = true
 	v.err = nil
-	f, job := v.fetcher, v.job
+	c, job := v.cache, v.job
 	return func() tea.Msg {
-		res, err := f.fetchResults(job)
+		res, err := c.get(job, fresh)
 		return resultsMsg{results: res, err: err}
 	}
 }
@@ -142,7 +149,7 @@ func (v *jobView) Activate(i int) tea.Cmd {
 	case itemOpen:
 		return plugins.OpenURL(v.job.url)
 	case itemRetry:
-		return v.fetch()
+		return v.fetch(true)
 	case itemGroup:
 		if v.expanded[it.state] {
 			v.expanded[it.state] = false

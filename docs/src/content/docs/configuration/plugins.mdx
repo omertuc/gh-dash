@@ -40,7 +40,8 @@ Plugins can hook into these parts of `gh-dash`:
 - **Check commands**: act on a PR's checks, e.g. rerun a CI job, by posting a command
   as a comment on the PR. With a notification's PR open, focus a check in the Checks tab
   and press <kbd>.</kbd> (the `checkCommands` key) to open a menu by the check listing
-  the commands plugins offer on it. Press a command's key, move to it with
+  the commands plugins offer on it. It works the same in a check's own tab, e.g. while
+  browsing a job's tests. Press a command's key, move to it with
   <kbd>j</kbd>/<kbd>k</kbd> and press <kbd>enter</kbd>, or click it to post it.
   <kbd>esc</kbd>, <kbd>q</kbd> or a click outside the menu closes it. Commands that are
   hard to take back ask for a <kbd>y</kbd> first. The focused check's hint says when it
@@ -65,6 +66,9 @@ whose checks link to Prow jobs, that Prow commented on or that have Prow's label
   skipped. Failed tests are listed right away, while the rest are listed a page at a time
   as you ask for them with "Load", since jobs may run thousands of tests. Focusing a test
   shows why it failed: its message and the end of its output.
+
+  The test results of a PR's failed jobs are fetched in the background as soon as the PR
+  is shown, a couple of jobs at a time, so opening one of them lists its tests right away.
 
   Test results are read from the job's artifacts in Google Cloud Storage, which only works
   when they're public. Jobs whose artifacts aren't can still be opened in the browser.

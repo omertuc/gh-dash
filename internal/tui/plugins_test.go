@@ -2,6 +2,8 @@ package tui
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -100,9 +102,12 @@ func init() {
 
 func newPluginTestModel(t *testing.T) Model {
 	t.Helper()
+	// Prow jobs' artifacts aren't found, rather than fetched from the internet
+	artifacts := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(artifacts.Close)
 	require.NoError(t, plugins.Configure(map[string]config.PluginConfig{
 		"fake-ui": {Enabled: true},
-		"prow":    {Enabled: true},
+		"prow":    {Enabled: true, Options: map[string]any{"artifactsUrl": artifacts.URL}},
 	}))
 	t.Cleanup(func() { _ = plugins.Configure(nil) })
 
@@ -347,4 +352,37 @@ func TestNotificationView_CheckCommandsGoByTheKeyPressed(t *testing.T) {
 	m.Update(tea.KeyPressMsg{Code: 'א', BaseCode: 't', Text: "א"})
 	require.Nil(t, m.checkMenu)
 	require.Equal(t, []string{"/test e2e-aws"}, pendingCommentBodies(m.ctx))
+}
+
+func TestNotificationView_CheckCommandsInACheckTab(t *testing.T) {
+	m := newPluginTestModel(t)
+	m.ctx.User = "me"
+	actions := keys.HintKeys(keys.NotificationKeys.CheckCommands) + " actions"
+
+	// The failed Prow job's tab offers the job's commands too
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	run(&m, cmd)
+	require.True(t, m.prView.IsPluginTab())
+	m.updateSidebarHints()
+	require.Contains(t, ansi.Strip(m.sidebar.View()), actions)
+	m.Update(tea.KeyPressMsg{Text: "."})
+	require.NotNil(t, m.checkMenu)
+	menu := ansi.Strip(m.checkMenu.View())
+	require.Contains(t, menu, "ci/prow/e2e-aws")
+	require.Contains(t, menu, "t  rerun     /test e2e-aws")
+	m.Update(tea.KeyPressMsg{Text: "t"})
+	require.Nil(t, m.checkMenu)
+	require.Equal(t, []string{"/test e2e-aws"}, pendingCommentBodies(m.ctx))
+	require.True(t, m.prView.IsPluginTab(), "the job's tab stays open")
+
+	// The fake check's tab has no commands, so . does nothing there
+	m = newPluginTestModel(t)
+	m.Update(tea.KeyPressMsg{Text: "j"})
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	run(&m, cmd)
+	require.Equal(t, "Fake", m.prView.SelectedTab())
+	m.updateSidebarHints()
+	require.NotContains(t, ansi.Strip(m.sidebar.View()), actions)
+	m.Update(tea.KeyPressMsg{Text: "."})
+	require.Nil(t, m.checkMenu)
 }

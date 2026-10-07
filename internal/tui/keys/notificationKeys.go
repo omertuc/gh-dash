@@ -105,7 +105,7 @@ var NotificationKeys = NotificationKeyMap{
 		key.WithHelp("enter", "open check in browser"),
 	),
 	// Only while a check that plugins offer commands on is focused in an
-	// open notification's PR, e.g. rerunning its job
+	// open notification's PR, or its tab is selected, e.g. rerunning its job
 	CheckCommands: key.NewBinding(
 		key.WithKeys("."),
 		key.WithHelp(".", "act on check"),

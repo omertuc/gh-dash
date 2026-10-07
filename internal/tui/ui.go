@@ -413,8 +413,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			i, _ := m.focusedPluginItem()
 			return m, m.activatePluginItem(i)
 
-		// With a check focused in an open notification's PR, show the commands
-		// plugins offer on it, e.g. rerunning its job
+		// With a check focused in an open notification's PR, or its tab
+		// selected, show the commands plugins offer on it, e.g. rerunning its
+		// job
 		case key.Matches(msg, keys.NotificationKeys.CheckCommands) && m.hasFocusedCheckCommands():
 			m.showFocusedCheckCommands()
 			return m, nil

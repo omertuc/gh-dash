@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -114,17 +115,19 @@ func (m *Model) openFocusedCheckInPlugin() (tea.Cmd, bool) {
 }
 
 // pluginFocusHint returns the hint for acting on the focused item of a
-// plugin's view, e.g. "enter load".
+// plugin's view, e.g. "enter load", and on the check the view was opened
+// from when plugins offer commands on it.
 func (m *Model) pluginFocusHint() string {
-	i, ok := m.focusedPluginItem()
-	if !ok {
-		return ""
+	var hints []string
+	if i, ok := m.focusedPluginItem(); ok {
+		if item, ok := m.prView.PluginItem(i); ok && item.Hint != "" {
+			hints = append(hints, keys.HintKeys(keys.NotificationKeys.ActivateItem)+" "+item.Hint)
+		}
 	}
-	item, ok := m.prView.PluginItem(i)
-	if !ok || item.Hint == "" {
-		return ""
+	if m.hasFocusedCheckCommands() {
+		hints = append(hints, keys.HintKeys(keys.NotificationKeys.CheckCommands)+" actions")
 	}
-	return keys.HintKeys(keys.NotificationKeys.ActivateItem) + " " + item.Hint
+	return strings.Join(hints, " · ")
 }
 
 // checkFocusHint returns the hint for opening the focused check, e.g.
@@ -143,25 +146,32 @@ func (m *Model) checkFocusHint() string {
 	return hint
 }
 
-func (m *Model) hasFocusedCheckCommands() bool {
-	check, ok := m.focusedCheck()
-	if !ok {
-		return false
+// focusedCheckCommands returns the check acted on in an open notification's
+// PR, the one focused in the Checks tab or the one whose tab is selected,
+// along with the commands plugins offer on it.
+func (m *Model) focusedCheckCommands() (string, []plugins.CheckCommand) {
+	if check, ok := m.focusedCheck(); ok {
+		return m.prView.CheckCommands(check)
 	}
-	_, commands := m.prView.CheckCommands(check)
+	if m.isNotificationSubjectShown() && m.notificationView.GetSubjectPR() != nil &&
+		m.prView.IsPluginTab() {
+		return m.prView.PluginTabCheckCommands()
+	}
+	return "", nil
+}
+
+func (m *Model) hasFocusedCheckCommands() bool {
+	_, commands := m.focusedCheckCommands()
 	return len(commands) > 0
 }
 
 // showFocusedCheckCommands floats a menu by the check focused in an open
-// notification's PR, listing the commands plugins offer on it, e.g.
-// rerunning its job. They're kept as they are now, so the check stays the
-// one acted on even if a refresh reorders the checks meanwhile.
+// notification's PR, or by the focused item of a check's tab, listing the
+// commands plugins offer on the check, e.g. rerunning its job. They're kept
+// as they are now, so the check stays the one acted on even if a refresh
+// reorders the checks meanwhile.
 func (m *Model) showFocusedCheckCommands() {
-	check, ok := m.focusedCheck()
-	if !ok {
-		return
-	}
-	name, commands := m.prView.CheckCommands(check)
+	name, commands := m.focusedCheckCommands()
 	if len(commands) == 0 {
 		return
 	}

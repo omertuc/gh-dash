@@ -44,8 +44,8 @@ func makeTests(state testState, n int) []*testResult {
 func newLoadedJobView() *jobView {
 	check := plugins.Check{Name: "ci/prow/e2e-aws", URL: jobURL("pull-ci-e2e-aws"), State: "FAILURE"}
 	job, _ := parseJobURL(check.URL)
-	opts := New().opts
-	v := newJobView(check, job, opts)
+	p := New()
+	v := newJobView(check, job, p.opts, p.results())
 	res := &jobResults{result: "FAILURE"}
 	res.tests[testFailed] = makeTests(testFailed, 3)
 	res.tests[testFailed][0].message = "expected 1, got 2"

@@ -16,6 +16,8 @@ type pluginTab struct {
 	// id tells the view's messages apart from those of views opened before
 	id   int64
 	view plugins.View
+	// check is the check the view was opened from
+	check plugins.Check
 	// items are the view's focusable items as last rendered
 	items []plugins.Item
 }
@@ -153,7 +155,7 @@ func (m *Model) OpenCheckInPlugin(i int) (tea.Cmd, bool) {
 		return nil, false
 	}
 	view := opener.OpenCheck(m.pluginPR(), items[i].check)
-	m.pluginTab = &pluginTab{id: lastPluginViewId.Add(1), view: view}
+	m.pluginTab = &pluginTab{id: lastPluginViewId.Add(1), view: view, check: items[i].check}
 	m.syncTabs()
 	m.setTab(pluginViewTab)
 	return m.wrapPluginCmd(view.Init()), true
@@ -233,5 +235,23 @@ func (m *Model) CheckCommands(i int) (string, []plugins.CheckCommand) {
 		return "", nil
 	}
 	check := items[i].check
+	return check.Name, plugins.CheckCommands(m.pluginPR(), check)
+}
+
+// PluginTabCheckCommands returns the name of the check whose tab is
+// selected, along with the commands the enabled plugins offer on it as it's
+// listed now, e.g. rerunning its job.
+func (m *Model) PluginTabCheckCommands() (string, []plugins.CheckCommand) {
+	if !m.IsPluginTab() || !m.hasData() {
+		return "", nil
+	}
+	check := m.pluginTab.check
+	for _, it := range m.checkItems() {
+		if it.check.Name == check.Name {
+			// Its state may have changed since, e.g. once it was rerun
+			check = it.check
+			break
+		}
+	}
 	return check.Name, plugins.CheckCommands(m.pluginPR(), check)
 }

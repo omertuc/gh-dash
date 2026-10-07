@@ -8,7 +8,8 @@
 //	    options: {}
 //
 // A plugin implements Plugin and any of the capability interfaces that it
-// needs: CommentCommander, PanelProvider, CheckOpener and CheckCommander.
+// needs: CommentCommander, PanelProvider, CheckOpener, CheckCommander and
+// Prefetcher.
 package plugins
 
 import (
@@ -79,6 +80,14 @@ type CheckCommand struct {
 	// Confirm asks before posting the comment, for commands that are hard
 	// to take back, e.g. overriding a status
 	Confirm bool
+}
+
+// Prefetcher fetches ahead in the background what it'll likely be asked to
+// show about a PR, e.g. its failed jobs' test results, so it's there without
+// waiting once asked. It's called whenever a PR is shown or its details
+// arrive, so it mustn't block, and should fetch each thing only once.
+type Prefetcher interface {
+	Prefetch(pr PR)
 }
 
 var (
@@ -175,6 +184,16 @@ func Panels(pr PR) []Panel {
 		}
 	}
 	return panels
+}
+
+// Prefetch asks the enabled plugins to fetch ahead what they'll likely be
+// asked to show about pr.
+func Prefetch(pr PR) {
+	for _, p := range Enabled() {
+		if pf, ok := p.(Prefetcher); ok {
+			pf.Prefetch(pr)
+		}
+	}
 }
 
 // CheckOpenerFor returns the enabled plugin that opens check, if any, along

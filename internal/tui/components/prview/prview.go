@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
+	"github.com/dlvhdr/gh-dash/v4/internal/plugins"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/carousel"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/cmpcontroller"
@@ -785,6 +786,7 @@ func (m *Model) SetRow(d *prrow.Data) {
 		m.pr = nil
 	} else {
 		m.pr = &prrow.PullRequest{Ctx: m.ctx, Data: d}
+		plugins.Prefetch(m.pluginPR())
 	}
 }
 
@@ -1181,6 +1183,7 @@ func (m *Model) SetEnrichedPR(data data.EnrichedPullRequestData) {
 	if m.pr != nil && m.pr.Data.Primary.Url == data.Url {
 		m.pr.Data.Enriched = data
 		m.pr.Data.IsEnriched = true
+		plugins.Prefetch(m.pluginPR())
 	}
 }
 

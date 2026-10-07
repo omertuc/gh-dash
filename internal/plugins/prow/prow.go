@@ -2,7 +2,8 @@
 // (https://docs.prow.k8s.io), e.g. Kubernetes' and OpenShift's. It offers
 // Prow's commands while writing a comment, shows who approved a PR and what
 // still needs approving, browses a Prow job's test results, and reruns or
-// overrides a PR's checks.
+// overrides a PR's checks. The test results of a PR's failed jobs are
+// prefetched once it's shown, so they're there once a job is opened.
 package prow
 
 import (
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dlvhdr/gh-dash/v4/internal/plugins"
 )
@@ -37,6 +39,9 @@ type Options struct {
 // Plugin is the prow plugin.
 type Plugin struct {
 	opts Options
+
+	cacheOnce sync.Once
+	cache     *resultsCache
 }
 
 // New returns the plugin with its default options.
@@ -288,5 +293,32 @@ func (p *Plugin) CheckAction(check plugins.Check) (string, bool) {
 // OpenCheck returns a view of the check's job's test results.
 func (p *Plugin) OpenCheck(pr plugins.PR, check plugins.Check) plugins.View {
 	job, _ := parseJobURL(check.URL)
-	return newJobView(check, job, p.opts)
+	return newJobView(check, job, p.opts, p.results())
+}
+
+// Prefetch fetches the test results of the PR's failed jobs in the
+// background, as those are the jobs whose tests are usually looked at.
+func (p *Plugin) Prefetch(pr plugins.PR) {
+	if pr.Primary == nil {
+		return
+	}
+	var jobs []jobRef
+	for _, c := range pr.Checks() {
+		if stateRank(c.State) != 0 {
+			continue
+		}
+		if job, ok := parseJobURL(c.URL); ok {
+			jobs = append(jobs, job)
+		}
+	}
+	p.results().prefetch(pr.Primary.Url, jobs)
+}
+
+// results returns the cache of jobs' results, made once the options are
+// applied.
+func (p *Plugin) results() *resultsCache {
+	p.cacheOnce.Do(func() {
+		p.cache = newResultsCache(newFetcher(p.opts.ArtifactsURL))
+	})
+	return p.cache
 }
