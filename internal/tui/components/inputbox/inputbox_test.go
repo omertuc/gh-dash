@@ -66,3 +66,51 @@ func TestArrowKeysMoveCursorWhileSuggestionsHidden(t *testing.T) {
 		t.Fatalf("down with suggestions showing moved the cursor to line %d", got)
 	}
 }
+
+// typedSource treats the whole input as what the user is completing.
+type typedSource struct{ twoSuggestions }
+
+func (typedSource) ExtractContext(input string, _ tea.Position) fuzzyselect.Context {
+	return fuzzyselect.Context{Content: input}
+}
+
+func TestEnterAcceptsSuggestionOnlyWhenPicked(t *testing.T) {
+	th := *theme.DefaultTheme
+	ctx := &context.ProgramContext{Config: &config.Config{}, Theme: th, Styles: context.InitStyles(th)}
+	ti := DefaultTextInput(ctx)
+	m := NewModel(ctx, ModelOpts{TextInput: &ti})
+	fzf := fuzzyselect.NewModel(ctx, typedSource{})
+	m.SetAutocomplete(&fzf)
+	enter := tea.KeyPressMsg{Code: tea.KeyEnter}
+
+	show := func(value string) {
+		m.SetValue(value)
+		fzf.Filter(value, m.CurrentAutocompleteContext(), nil)
+		fzf.Show()
+	}
+
+	show("al")
+	fzf.Hide()
+	if m.AcceptsSuggestion(enter) {
+		t.Fatal("enter with the popup hidden should not accept a suggestion")
+	}
+
+	show("")
+	if m.AcceptsSuggestion(enter) {
+		t.Fatal("enter with nothing typed or picked should not accept a suggestion")
+	}
+	fzf.Next()
+	if !m.AcceptsSuggestion(enter) {
+		t.Fatal("enter after moving through the list should accept the suggestion")
+	}
+
+	show("al")
+	if !m.AcceptsSuggestion(enter) {
+		t.Fatal("enter partway through a suggestion should accept it")
+	}
+
+	show("alice")
+	if m.AcceptsSuggestion(enter) {
+		t.Fatal("enter with the suggestion already typed should not accept it")
+	}
+}

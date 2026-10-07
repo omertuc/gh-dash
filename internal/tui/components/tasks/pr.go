@@ -12,6 +12,7 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/data"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 	"github.com/dlvhdr/gh-dash/v4/internal/utils"
 )
 
@@ -218,7 +219,7 @@ func MergePR(ctx *context.ProgramContext, section SectionIdentifier, pr data.Row
 	}
 	startCmd := ctx.StartTask(task)
 
-	return tea.Batch(startCmd, tea.ExecProcess(c, func(err error) tea.Msg {
+	return tea.Batch(startCmd, keys.ExecProcess(c, func(err error) tea.Msg {
 		isMerged := err == nil && c.ProcessState.ExitCode() == 0
 
 		return constants.TaskFinishedMsg{
@@ -260,7 +261,7 @@ func CreatePR(
 	}
 	startCmd := ctx.StartTask(task)
 
-	return tea.Batch(startCmd, tea.ExecProcess(c, func(err error) tea.Msg {
+	return tea.Batch(startCmd, keys.ExecProcess(c, func(err error) tea.Msg {
 		isCreated := err == nil && c.ProcessState.ExitCode() == 0
 
 		return constants.TaskFinishedMsg{

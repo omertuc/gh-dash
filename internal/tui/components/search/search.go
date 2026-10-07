@@ -139,6 +139,12 @@ func (m *Model) Blur() {
 	m.cmpctl.Exit()
 }
 
+// AcceptsSuggestion reports whether the key would accept the selected
+// suggestion rather than submit the search.
+func (m Model) AcceptsSuggestion(msg tea.KeyMsg) bool {
+	return m.cmpctl.AcceptsSuggestion(msg)
+}
+
 func (m *Model) SetValue(val string) {
 	m.cmpctl.SetValue(val)
 }

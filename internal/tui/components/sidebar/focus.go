@@ -5,6 +5,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	zone "github.com/lrstanley/bubblezone/v2"
 )
 
 // focusItem is a range of content lines that can be focused, e.g. a comment.
@@ -303,4 +304,25 @@ func (m Model) withTitleHint(line string, boxed bool) string {
 		return line
 	}
 	return ansi.Cut(line, 0, start) + hint + ansi.Cut(line, end, ansi.StringWidth(line))
+}
+
+// FocusedScreenPos returns where the focused item's first line in view is
+// on the screen, along with the content's width, e.g. to float a menu by it.
+// It reports false when nothing is focused or in view, or the preview wasn't
+// shown yet.
+func (m Model) FocusedScreenPos() (x, y, width int, ok bool) {
+	items := m.focusItems()
+	if !m.IsOpen || m.focus < 0 || m.focus >= len(items) || items[m.focus].preamble {
+		return 0, 0, 0, false
+	}
+	z := zone.Get(contentZoneId)
+	if z == nil || z.IsZero() {
+		return 0, 0, 0, false
+	}
+	it := items[m.focus]
+	top, h := m.viewport.YOffset(), m.viewport.Height()
+	if it.end <= top || it.start >= top+h {
+		return 0, 0, 0, false
+	}
+	return z.StartX, z.StartY + max(it.start, top) - top, z.EndX - z.StartX + 1, true
 }

@@ -254,3 +254,97 @@ func TestNotificationView_StaleViewMessagesAreDropped(t *testing.T) {
 	require.False(t, fake.view.loaded)
 	require.False(t, first.loaded)
 }
+
+func pendingCommentBodies(ctx *context.ProgramContext) []string {
+	var bodies []string
+	for c := range ctx.PendingComments {
+		bodies = append(bodies, c.Body)
+	}
+	return bodies
+}
+
+func TestNotificationView_CheckCommandsArePickedAndPosted(t *testing.T) {
+	m := newPluginTestModel(t)
+	m.ctx.User = "me"
+	actions := keys.HintKeys(keys.NotificationKeys.CheckCommands) + " actions"
+	menu := func() string {
+		require.NotNil(t, m.checkMenu, "the menu should be open")
+		return ansi.Strip(m.checkMenu.View())
+	}
+
+	// The failed Prow job is focused, with its commands a key away in a menu
+	m.updateSidebarHints()
+	require.Contains(t, ansi.Strip(m.sidebar.View()), actions)
+	m.Update(tea.KeyPressMsg{Text: "."})
+	require.Contains(t, menu(), "ci/prow/e2e-aws")
+	require.Contains(t, menu(), "t  rerun     /test e2e-aws")
+	require.Contains(t, menu(), "o  override  /override ci/prow/e2e-aws")
+	require.NotContains(t, menu(), "/retest", "rerunning all failed jobs isn't about this check")
+
+	// The menu floats over the screen
+	layer := m.viewCheckMenu()
+	require.NotNil(t, layer)
+	require.Equal(t, m.checkMenu.View(), layer.GetContent())
+
+	// Esc dismisses it, and nothing else
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Nil(t, m.checkMenu)
+	require.NotNil(t, m.notificationView.GetSubjectPR(), "esc should not close the notification")
+	require.Empty(t, pendingCommentBodies(m.ctx))
+
+	// Rerunning the job comments right away
+	m.Update(tea.KeyPressMsg{Text: "."})
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "t"})
+	require.NotNil(t, cmd)
+	require.Nil(t, m.checkMenu)
+	require.Equal(t, []string{"/test e2e-aws"}, pendingCommentBodies(m.ctx))
+
+	// Overriding it asks first
+	m.ctx.PendingComments = nil
+	m.Update(tea.KeyPressMsg{Text: "."})
+	m.Update(tea.KeyPressMsg{Text: "o"})
+	require.Contains(t, menu(), "Comment /override ci/prow/e2e-aws?")
+	m.Update(tea.KeyPressMsg{Text: "n"})
+	require.Nil(t, m.checkMenu)
+	require.Empty(t, pendingCommentBodies(m.ctx))
+
+	m.Update(tea.KeyPressMsg{Text: "."})
+	m.Update(tea.KeyPressMsg{Text: "o"})
+	m.Update(tea.KeyPressMsg{Text: "y"})
+	require.Equal(t, []string{"/override ci/prow/e2e-aws"}, pendingCommentBodies(m.ctx))
+
+	// Clicking a command picks it, and clicking elsewhere dismisses the menu
+	m.ctx.PendingComments = nil
+	m.Update(tea.KeyPressMsg{Text: "."})
+	m.viewCheckMenu()
+	pos := m.checkMenuPos
+	m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: pos.X + 5, Y: pos.Y + 2})
+	require.Nil(t, m.checkMenu)
+	require.Equal(t, []string{"/test e2e-aws"}, pendingCommentBodies(m.ctx))
+
+	m.ctx.PendingComments = nil
+	m.Update(tea.KeyPressMsg{Text: "."})
+	m.viewCheckMenu()
+	m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.checkMenuPos.X - 1, Y: m.checkMenuPos.Y})
+	require.Nil(t, m.checkMenu)
+	require.Empty(t, pendingCommentBodies(m.ctx))
+
+	// The fake check has no commands, so . does nothing there
+	m.Update(tea.KeyPressMsg{Text: "j"})
+	m.updateSidebarHints()
+	require.NotContains(t, ansi.Strip(m.sidebar.View()), actions)
+	m.Update(tea.KeyPressMsg{Text: "."})
+	require.Nil(t, m.checkMenu)
+}
+
+func TestNotificationView_CheckCommandsGoByTheKeyPressed(t *testing.T) {
+	m := newPluginTestModel(t)
+	m.ctx.User = "me"
+
+	// On a Hebrew layout, the keys of . and t type ץ and א
+	m.Update(tea.KeyPressMsg{Code: 'ץ', BaseCode: '.', Text: "ץ"})
+	require.NotNil(t, m.checkMenu)
+	m.Update(tea.KeyPressMsg{Code: 'א', BaseCode: 't', Text: "א"})
+	require.Nil(t, m.checkMenu)
+	require.Equal(t, []string{"/test e2e-aws"}, pendingCommentBodies(m.ctx))
+}

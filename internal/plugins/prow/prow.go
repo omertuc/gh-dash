@@ -1,7 +1,8 @@
 // Package prow is a plugin for repos whose PRs are managed by Prow
 // (https://docs.prow.k8s.io), e.g. Kubernetes' and OpenShift's. It offers
 // Prow's commands while writing a comment, shows who approved a PR and what
-// still needs approving, and browses a Prow job's test results.
+// still needs approving, browses a Prow job's test results, and reruns or
+// overrides a PR's checks.
 package prow
 
 import (
@@ -174,6 +175,27 @@ func (p *Plugin) CommentCommands(pr plugins.PR) []plugins.CommentCommand {
 		})
 	}
 	return append(commands, p.opts.ExtraCommands...)
+}
+
+// CheckCommands offers rerunning the check's job with /test, and overriding
+// the check with /override unless it passed.
+func (p *Plugin) CheckCommands(pr plugins.PR, check plugins.Check) []plugins.CheckCommand {
+	if !managesPR(pr) || check.Name == "tide" {
+		return nil
+	}
+	var commands []plugins.CheckCommand
+	if name, ok := jobNameFromContext(check); ok {
+		commands = append(commands, plugins.CheckCommand{
+			Key: "t", Label: "rerun", Comment: "/test " + name,
+		})
+	}
+	if (check.IsStatusContext || check.Required) && strings.ToUpper(check.State) != "SUCCESS" {
+		// Only commit statuses can be overridden
+		commands = append(commands, plugins.CheckCommand{
+			Key: "o", Label: "override", Comment: "/override " + check.Name, Confirm: true,
+		})
+	}
+	return commands
 }
 
 type testableJob struct {

@@ -14,16 +14,23 @@ const mouseWheelLines = 3
 // search being typed or a y/n confirmation. Clicks elsewhere are ignored then,
 // so they can't pull the rug out from under it.
 func (m *Model) isAwaitingInput() bool {
+	return m.isTypingText() ||
+		m.footer.ShowConfirmQuit ||
+		m.notificationView.HasPendingAction() ||
+		m.confirmingDraftDiscard ||
+		m.checkMenu != nil ||
+		m.mode == ModeSection
+}
+
+// isTypingText reports whether keys type text somewhere, e.g. a comment or
+// a search, rather than being shortcuts.
+func (m *Model) isTypingText() bool {
 	currSection := m.getCurrSection()
 	return (currSection != nil && (currSection.IsSearchFocused() ||
 		currSection.IsPromptConfirmationFocused())) ||
 		m.prView.IsTextInputBoxFocused() ||
 		m.issueSidebar.IsTextInputBoxFocused() ||
-		m.sidebar.IsSearching() ||
-		m.footer.ShowConfirmQuit ||
-		m.notificationView.HasPendingAction() ||
-		m.confirmingDraftDiscard ||
-		m.mode == ModeSection
+		m.sidebar.IsSearching()
 }
 
 // onMouseWheel scrolls the preview when the mouse is over it, and otherwise
@@ -65,6 +72,9 @@ func (m *Model) onMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 
 // onMouseClick acts on a left click on whatever is under the mouse.
 func (m *Model) onMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if m.checkMenu != nil {
+		return m.clickCheckMenu(msg)
+	}
 	if m.ctx.Config == nil || m.isAwaitingInput() {
 		return nil
 	}

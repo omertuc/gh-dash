@@ -37,6 +37,14 @@ Plugins can hook into these parts of `gh-dash`:
   plugin opens it, e.g. "enter view tests". In the check's tab, <kbd>j</kbd>/<kbd>k</kbd>
   move between its items and <kbd>enter</kbd> (the `activateItem` key) or a click acts on
   the focused one.
+- **Check commands**: act on a PR's checks, e.g. rerun a CI job, by posting a command
+  as a comment on the PR. With a notification's PR open, focus a check in the Checks tab
+  and press <kbd>.</kbd> (the `checkCommands` key) to open a menu by the check listing
+  the commands plugins offer on it. Press a command's key, move to it with
+  <kbd>j</kbd>/<kbd>k</kbd> and press <kbd>enter</kbd>, or click it to post it.
+  <kbd>esc</kbd>, <kbd>q</kbd> or a click outside the menu closes it. Commands that are
+  hard to take back ask for a <kbd>y</kbd> first. The focused check's hint says when it
+  has any, e.g. ". actions".
 
 ## Prow
 
@@ -47,6 +55,8 @@ whose checks link to Prow jobs, that Prow commented on or that have Prow's label
   `/approve`, `/hold`, `/hold cancel`, `/retest` and `/ok-to-test`, along with `/test`
   for each of the PR's jobs and `/override` for each of its statuses, failing ones first.
   Jobs Prow lists in its comments, e.g. its failed tests report, are suggested too.
+- **Check commands**: in a check's menu, <kbd>t</kbd> reruns its job with `/test`, and
+  <kbd>o</kbd> overrides it with `/override` unless it passed, once confirmed.
 - **Approvals**: a panel in the overview shows who LGTM'd the PR, who approved it and
   which `OWNERS` files still need approving and by whom, as summarized by Prow's approval
   comment, along with what blocks merging, like `do-not-merge/hold` or `needs-rebase`.

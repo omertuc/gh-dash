@@ -230,6 +230,10 @@ func (m *Model) Update(msg tea.Msg) (section.Section, tea.Cmd) {
 				return m, blinkCmd
 
 			case "enter":
+				// Let the search bar take enter to accept a suggestion
+				if m.SearchBar.AcceptsSuggestion(msg) {
+					break
+				}
 				m.SearchValue = m.SearchBar.Value()
 				m.SyncSmartFilterWithSearchValue()
 				m.SetIsSearching(false)

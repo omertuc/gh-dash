@@ -31,14 +31,21 @@ type Model struct {
 	detachable bool
 }
 
+// SubmitKey submits the input. Terminals without keyboard enhancements can't
+// tell ctrl+enter from enter, so ctrl+d keeps working there.
+var SubmitKey = key.NewBinding(
+	key.WithKeys("ctrl+enter", "ctrl+d"),
+	key.WithHelp("Ctrl+enter", "submit"),
+)
+
 var inputKeys = []key.Binding{
-	key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+d", "submit")),
+	SubmitKey,
 	key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("Ctrl+c/esc", "cancel")),
 	keys.CmpKeys.ToggleSuggestions,
 }
 
 var detachableInputKeys = []key.Binding{
-	key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("Ctrl+d", "submit")),
+	SubmitKey,
 	key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "detach")),
 	key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("Ctrl+c", "cancel")),
 	keys.CmpKeys.ToggleSuggestions,
@@ -207,7 +214,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			case navigates && key.Matches(msg, keys.CmpKeys.NextKey):
 				m.fzfSelect.Next()
 				return m, nil
-			case m.fzfSelect.Selected() != "" && key.Matches(msg, keys.CmpKeys.SelectKey):
+			case m.AcceptsSuggestion(msg):
 				selected := m.fzfSelect.Selected()
 				if selected != "" && m.fzfSelect.Source != nil {
 					currentValue := m.Value()
@@ -242,6 +249,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 	cmd := m.updateInput(msg)
 	return m, cmd
+}
+
+// AcceptsSuggestion reports whether the key would accept the selected
+// suggestion. Enter also submits or breaks lines, so it accepts only once the
+// user picked a suggestion or is partway through typing one.
+func (m Model) AcceptsSuggestion(msg tea.KeyMsg) bool {
+	if m.fzfSelect == nil || !key.Matches(msg, keys.CmpKeys.SelectKey) {
+		return false
+	}
+	selected := m.fzfSelect.Selected()
+	if selected == "" {
+		return false
+	}
+	if msg.String() != "enter" || m.fzfSelect.Navigated() {
+		return true
+	}
+	typed := m.CurrentAutocompleteContext().Content
+	return typed != "" && !strings.EqualFold(typed, selected)
 }
 
 func (m *Model) updateInput(msg tea.Msg) tea.Cmd {

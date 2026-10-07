@@ -26,8 +26,8 @@ var CmpKeys = CmpKeyMap{
 		key.WithHelp("↑/ctrl+p", "previous"),
 	),
 	SelectKey: key.NewBinding(
-		key.WithKeys("ctrl+y"),
-		key.WithHelp("ctrl+y", "select"),
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "select"),
 	),
 	RefreshSuggestionsKey: key.NewBinding(
 		key.WithKeys("ctrl+f"),

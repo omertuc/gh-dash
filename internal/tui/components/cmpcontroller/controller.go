@@ -140,6 +140,12 @@ func (c *Controller) Focused() bool {
 	return c.inputBox.Focused()
 }
 
+// AcceptsSuggestion reports whether the key would accept the selected
+// suggestion rather than reach whoever owns the input.
+func (c *Controller) AcceptsSuggestion(msg tea.KeyMsg) bool {
+	return c.Active() && !c.detached && c.inputBox.AcceptsSuggestion(msg)
+}
+
 func (c *Controller) ViewCompletions() string {
 	return c.inputBox.ViewCompletions()
 }

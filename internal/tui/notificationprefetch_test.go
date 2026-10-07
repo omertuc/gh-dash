@@ -150,6 +150,29 @@ func TestOpeningPrefetchedNotificationShowsItRightAway(t *testing.T) {
 	require.False(t, m.testNotification(0).Notification.Unread, "opening it should mark it as read")
 }
 
+func TestNotificationsHaveNoPreview(t *testing.T) {
+	m := newPrefetchTestModel(t, 3)
+	m.cacheTestPR(0, "The PR")
+	require.False(t, m.ctx.SidebarOpen, "the list should have no preview next to it")
+	require.Equal(t, m.ctx.ScreenWidth, m.ctx.MainContentWidth)
+
+	// Toggling the preview does nothing here, and is kept for the other views
+	m.previewOpen = false
+	m.Update(tea.KeyPressMsg{Text: "p"})
+	require.False(t, m.ctx.SidebarOpen)
+	require.False(t, m.previewOpen)
+
+	// A notification still opens, whether or not the other views have a preview
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.True(t, m.ctx.PreviewFullscreen)
+	require.Contains(t, ansi.Strip(m.View().Content), "The PR")
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.False(t, m.ctx.PreviewFullscreen)
+	require.False(t, m.ctx.SidebarOpen)
+	require.Equal(t, m.ctx.ScreenWidth, m.ctx.MainContentWidth)
+}
+
 func TestLeavingNotificationWhileLoading(t *testing.T) {
 	m := newPrefetchTestModel(t, 3)
 

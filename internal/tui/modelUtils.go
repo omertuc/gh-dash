@@ -22,6 +22,7 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/section"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/constants"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/context"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/markdown"
 )
 
@@ -324,7 +325,7 @@ type execProcessFinishedMsg struct{}
 func (m *Model) executeCustomCommand(cmd string) tea.Cmd {
 	log.Debug("executing custom command", "cmd", cmd)
 	c := shell.Command(cmd)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
+	return keys.ExecProcess(c, func(err error) tea.Msg {
 		if err != nil {
 			mdRenderer := markdown.GetMarkdownRenderer(m.ctx.ScreenWidth, m.ctx)
 			md, mdErr := mdRenderer.Render(fmt.Sprintf("While running: `%s`", cmd))

@@ -1,9 +1,17 @@
 package tui
 
 import (
-	tea "charm.land/bubbletea/v2"
+	"fmt"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/dlvhdr/gh-dash/v4/internal/plugins"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/actionmenu"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/notificationssection"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prview"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/tasks"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 
 	// Makes the built-in plugins available to be enabled in the config
@@ -120,7 +128,8 @@ func (m *Model) pluginFocusHint() string {
 }
 
 // checkFocusHint returns the hint for opening the focused check, e.g.
-// "enter view tests" when a plugin opens it.
+// "enter view tests" when a plugin opens it, and for acting on it when
+// plugins offer commands on it.
 func (m *Model) checkFocusHint() string {
 	hint := keys.HintKeys(keys.NotificationKeys.OpenCheck) + " open"
 	if check, ok := m.focusedCheck(); ok {
@@ -128,7 +137,103 @@ func (m *Model) checkFocusHint() string {
 			hint = keys.HintKeys(keys.NotificationKeys.OpenCheck) + " " + label
 		}
 	}
+	if m.hasFocusedCheckCommands() {
+		hint += " · " + keys.HintKeys(keys.NotificationKeys.CheckCommands) + " actions"
+	}
 	return hint
+}
+
+func (m *Model) hasFocusedCheckCommands() bool {
+	check, ok := m.focusedCheck()
+	if !ok {
+		return false
+	}
+	_, commands := m.prView.CheckCommands(check)
+	return len(commands) > 0
+}
+
+// showFocusedCheckCommands floats a menu by the check focused in an open
+// notification's PR, listing the commands plugins offer on it, e.g.
+// rerunning its job. They're kept as they are now, so the check stays the
+// one acted on even if a refresh reorders the checks meanwhile.
+func (m *Model) showFocusedCheckCommands() {
+	check, ok := m.focusedCheck()
+	if !ok {
+		return
+	}
+	name, commands := m.prView.CheckCommands(check)
+	if len(commands) == 0 {
+		return
+	}
+	items := make([]actionmenu.Item, 0, len(commands))
+	for _, c := range commands {
+		item := actionmenu.Item{Key: c.Key, Label: c.Label, Detail: c.Comment}
+		if c.Confirm {
+			item.Confirm = fmt.Sprintf("Comment %s?", c.Comment)
+		}
+		items = append(items, item)
+	}
+	m.checkMenu = actionmenu.New(m.ctx, name, items)
+	m.checkCommands = commands
+}
+
+// onCheckMenuResult posts the command picked in the check's menu, if any,
+// once the menu is done.
+func (m *Model) onCheckMenuResult(res actionmenu.Result) tea.Cmd {
+	if !res.Closed {
+		return nil
+	}
+	commands := m.checkCommands
+	m.checkMenu, m.checkCommands = nil, nil
+	if res.Picked < 0 || res.Picked >= len(commands) {
+		return nil
+	}
+	return m.postCheckCommand(commands[res.Picked])
+}
+
+// clickCheckMenu handles a click while the check's menu is open: on one of
+// its commands it picks it, and anywhere else it dismisses the menu.
+func (m *Model) clickCheckMenu(msg tea.MouseClickMsg) tea.Cmd {
+	mouse := msg.Mouse()
+	return m.onCheckMenuResult(m.checkMenu.Click(mouse.X-m.checkMenuPos.X, mouse.Y-m.checkMenuPos.Y))
+}
+
+// viewCheckMenu lays out the check's menu, when open, just below the
+// focused check's first line, or above it when there's no room below.
+// Without the check's position, e.g. before the preview was first drawn, it
+// floats at the top of the preview.
+func (m *Model) viewCheckMenu() *lipgloss.Layer {
+	if m.checkMenu == nil {
+		return nil
+	}
+	view := m.checkMenu.View()
+	w, h := lipgloss.Width(view), lipgloss.Height(view)
+	pos := m.ctx.PreviewCursorPosition()
+	x, y := pos.X+2, pos.Y+2
+	if cx, cy, cw, ok := m.sidebar.FocusedScreenPos(); ok {
+		x, y = cx+4, cy+1
+		if x+w > cx+cw {
+			x = cx + cw - w
+		}
+		if bottom := m.ctx.ScreenHeight - common.FooterHeight; y+h > bottom {
+			y = cy - h
+		}
+	}
+	x = max(0, min(x, m.ctx.ScreenWidth-w))
+	y = max(0, min(y, m.ctx.ScreenHeight-h))
+	m.checkMenuPos = tea.Position{X: x, Y: y}
+	return lipgloss.NewLayer(view).X(x).Y(y).Z(1)
+}
+
+// postCheckCommand comments a check's command on the open notification's PR,
+// e.g. "/test e2e-aws".
+func (m *Model) postCheckCommand(c plugins.CheckCommand) tea.Cmd {
+	pr := m.notificationView.GetSubjectPR()
+	if pr == nil {
+		return nil
+	}
+	sid := tasks.SectionIdentifier{Id: m.currSectionId, Type: notificationssection.SectionType}
+	return tasks.CommentOnPR(m.ctx, sid, pr, c.Comment)
 }
 
 // clickPluginItem activates a clicked item of a plugin's view when it's

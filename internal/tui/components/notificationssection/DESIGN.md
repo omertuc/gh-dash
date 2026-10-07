@@ -47,29 +47,7 @@ Unlike PRs and Issues which auto-fetch content when selected, notifications requ
 - Users should consciously decide when to mark something as read
 - Prevents accidental "read" marking when just browsing the list
 
-When a notification is selected but not yet viewed, a prompt is displayed in the Preview pane:
-
-```
-      Press [Enter] to view the PR
-      (Note: this will mark it as read)
-
-      Other Actions
-
-            [D]  mark as done
-            [m]  mark as read
-            [u]  unsubscribe
-            [b]  toggle bookmark
-            [t]  toggle filtering
-            [S]  sort by repo
-            [o]  open in browser
-        [Enter]  view
-```
-
-- Keys are displayed with a background highlight
-- Actions are displayed in green (success color)
-- The note about marking as read appears for all notification types
-- For PR/Issue types: "Press Enter to view the PR/Issue"
-- For other notification types (Discussion, Release, etc.): "Press Enter to open in browser"
+There is no preview pane next to the notifications list. Opening a notification shows its PR or Issue fullscreen, and going back returns to the full-width list.
 
 #### 2. Notification Data Flow
 
@@ -85,8 +63,6 @@ notificationssection.go (stores []notificationrow.Data)
       ├──▶ notificationrow.go (renders table rows)
       │
       └──▶ notificationview.go (renders sidebar detail)
-           OR
-           renderNotificationPrompt() (shows action prompt)
 ```
 
 #### 3. Comment Count Tracking

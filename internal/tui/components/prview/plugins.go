@@ -220,3 +220,18 @@ func (m *Model) ActivatePluginItem(i int) tea.Cmd {
 	}
 	return m.wrapPluginCmd(m.pluginTab.view.Activate(i))
 }
+
+// CheckCommands returns the name of the check at the given index, as listed,
+// along with the commands the enabled plugins offer on it, e.g. rerunning
+// its job.
+func (m *Model) CheckCommands(i int) (string, []plugins.CheckCommand) {
+	if !m.hasData() {
+		return "", nil
+	}
+	items := m.checkItems()
+	if i < 0 || i >= len(items) {
+		return "", nil
+	}
+	check := items[i].check
+	return check.Name, plugins.CheckCommands(m.pluginPR(), check)
+}

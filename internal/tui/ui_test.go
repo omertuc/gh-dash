@@ -423,7 +423,7 @@ func TestNotificationView_EnterKeyWorksAfterViewingPR(t *testing.T) {
 	m.notifications = []section.Section{&notifSec}
 
 	// Set up a PR notification subject (simulating that Enter was already pressed once)
-	m.notificationView.SetSubjectPR(&prrow.Data{}, "test-notification-1")
+	m.notificationView.SetSubjectPR(&prrow.Data{Primary: &data.PullRequestData{}}, "test-notification-1")
 
 	// Verify GetSubjectPR returns non-nil
 	require.NotNil(t, m.notificationView.GetSubjectPR(), "subject PR should be set")

@@ -32,6 +32,7 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/git"
 	"github.com/dlvhdr/gh-dash/v4/internal/plugins"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/actionmenu"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/branch"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/branchsidebar"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/footer"
@@ -73,7 +74,10 @@ type Model struct {
 	taskSpinner      spinner.Model
 	tasks            map[string]context.Task
 	positionOverride string // "" means no override, "right" or "bottom"
-	mode             Mode
+	// previewOpen is whether the preview is open in the views that have one,
+	// kept while in the notifications view, which has none
+	previewOpen bool
+	mode        Mode
 
 	// sidebarComments are the comments shown in the sidebar, in the order
 	// the sidebar's anchors are in
@@ -87,6 +91,12 @@ type Model struct {
 	// confirmingCommentDelete is the id of the focused comment whose
 	// deletion awaits a y/n
 	confirmingCommentDelete string
+	// checkMenu floats by the focused check while one of checkCommands, the
+	// commands plugins offer on it, is being picked
+	checkMenu     *actionmenu.Model
+	checkCommands []plugins.CheckCommand
+	// checkMenuPos is where checkMenu was last drawn, for clicks on it
+	checkMenuPos tea.Position
 
 	// watchingDoneStore is set once the done store is being watched for
 	// outside changes.
@@ -241,7 +251,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		currRowData     = m.getCurrRowData()
 	)
 
+	// Shortcuts go by the key pressed, whatever the keyboard layout, while
+	// typed text stays as typed
+	if press, ok := msg.(tea.KeyPressMsg); ok && !m.isTypingText() {
+		msg = keys.Physical(press)
+	}
+
 	switch msg := msg.(type) {
+	case tea.KeyboardEnhancementsMsg:
+		if msg.SupportsKeyDisambiguation() {
+			return m, keys.RequestPhysicalKeys()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		log.Info("Key pressed", "key", msg.String())
 		m.ctx.Error = nil
@@ -307,6 +329,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.deleteFocusedComment(id)
 			}
 			return m, nil
+		}
+
+		// Pick one of the focused check's commands
+		if m.checkMenu != nil {
+			return m, m.onCheckMenuResult(m.checkMenu.Update(msg))
 		}
 
 		// While the help is open, q and esc close it instead of quitting or
@@ -385,6 +412,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.NotificationKeys.ActivateItem) && m.hasFocusedPluginItem():
 			i, _ := m.focusedPluginItem()
 			return m, m.activatePluginItem(i)
+
+		// With a check focused in an open notification's PR, show the commands
+		// plugins offer on it, e.g. rerunning its job
+		case key.Matches(msg, keys.NotificationKeys.CheckCommands) && m.hasFocusedCheckCommands():
+			m.showFocusedCheckCommands()
+			return m, nil
 
 		// With a check focused in an open notification's PR, open it
 		case key.Matches(msg, keys.NotificationKeys.OpenCheck) && m.hasFocusedCheck():
@@ -489,11 +522,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, m.keys.TogglePreview):
-			m.sidebar.IsOpen = !m.sidebar.IsOpen
-			m.syncMainContentDimensions()
+			if m.ctx.View != config.NotificationsView {
+				m.sidebar.IsOpen = !m.sidebar.IsOpen
+				m.syncMainContentDimensions()
+			}
 
 		case key.Matches(msg, m.keys.TogglePreviewPosition):
-			if m.sidebar.IsOpen {
+			if m.sidebar.IsOpen && m.ctx.View != config.NotificationsView {
 				if m.ctx.PreviewPosition == "right" {
 					m.positionOverride = "bottom"
 				} else {
@@ -907,6 +942,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ctx.View = m.ctx.Config.Defaults.View
 		m.currSectionId = 0
 		m.sidebar.IsOpen = msg.Config.Defaults.Preview.Open
+		m.previewOpen = m.sidebar.IsOpen
 		m.syncMainContentDimensions()
 
 		m.initSections()
@@ -1251,8 +1287,10 @@ func (m *Model) View() tea.View {
 	currSection := m.getCurrSection()
 	if m.ctx.PreviewFullscreen {
 		content = m.sidebar.View()
+	} else if currSection != nil && !m.ctx.SidebarOpen {
+		content = currSection.View()
 	} else if currSection != nil {
-		if m.ctx.PreviewPosition == "bottom" && m.sidebar.IsOpen {
+		if m.ctx.PreviewPosition == "bottom" {
 			content = lipgloss.JoinVertical(
 				lipgloss.Left,
 				m.getCurrSection().View(),
@@ -1315,6 +1353,10 @@ func (m *Model) View() tea.View {
 	if issueCmp != "" {
 		y := m.ctx.ScreenHeight - common.FooterHeight - m.issueSidebar.InputBoxLineFromButton() - common.InputBoxHeight - 6
 		layers = append(layers, lipgloss.NewLayer(issueCmp).X(previewPos.X+3).Y(y))
+	}
+
+	if menu := m.viewCheckMenu(); menu != nil {
+		layers = append(layers, menu)
 	}
 
 	// Compositing re-parses the whole screen, so only pay for it when there
@@ -1385,7 +1427,7 @@ func (m *Model) stopNotificationLoading(notificationId string) {
 // isNotificationLoadingShown reports whether the sidebar is showing the
 // notification whose subject is being loaded.
 func (m *Model) isNotificationLoadingShown() bool {
-	if !m.sidebar.IsOpen || m.ctx.View != config.NotificationsView {
+	if m.ctx.View != config.NotificationsView {
 		return false
 	}
 	row, ok := m.getCurrRowData().(*notificationrow.Data)
@@ -1554,12 +1596,23 @@ func (m *Model) syncMainContentDimensions() {
 	m.ctx.PreviewPosition = m.resolvePreviewPosition()
 	m.ctx.PreviewFullscreen = false
 
-	if !m.sidebar.IsOpen {
+	// Notifications have no preview. A notification's PR or Issue gets the
+	// whole screen instead - the list isn't useful while reading it, or
+	// waiting for it to load.
+	if m.ctx.View == config.NotificationsView {
+		m.sidebar.IsOpen = m.isNotificationOpen()
+	}
+	if !m.sidebar.IsOpen || m.ctx.View == config.NotificationsView {
 		m.ctx.MainContentWidth = m.ctx.ScreenWidth
 		m.ctx.MainContentHeight = m.getBaseContentHeight()
 		m.ctx.DynamicPreviewWidth = 0
 		m.ctx.DynamicPreviewHeight = 0
 		m.ctx.SidebarOpen = false
+		if m.isNotificationOpen() {
+			m.ctx.PreviewFullscreen = true
+			m.ctx.PreviewPosition = "right"
+			m.ctx.DynamicPreviewWidth = m.ctx.ScreenWidth
+		}
 		return
 	}
 
@@ -1587,18 +1640,6 @@ func (m *Model) syncMainContentDimensions() {
 		}
 		m.ctx.DynamicPreviewWidth = min(int(w), m.ctx.ScreenWidth)
 		m.ctx.MainContentWidth = m.ctx.ScreenWidth - m.ctx.DynamicPreviewWidth
-		m.ctx.DynamicPreviewHeight = 0
-	}
-
-	// A notification's PR or Issue gets the whole screen - the notifications
-	// list isn't useful while reading it, or waiting for it to load. The
-	// section keeps its dimensions so going back to it doesn't need a
-	// relayout.
-	if m.isNotificationOpen() {
-		m.ctx.PreviewFullscreen = true
-		m.ctx.PreviewPosition = "right"
-		m.ctx.MainContentHeight = m.getBaseContentHeight()
-		m.ctx.DynamicPreviewWidth = m.ctx.ScreenWidth
 		m.ctx.DynamicPreviewHeight = 0
 	}
 }
@@ -1687,7 +1728,7 @@ const previewScrollLines = 3
 // isNotificationSubjectShown reports whether a notification's PR or Issue is
 // open in the preview.
 func (m *Model) isNotificationSubjectShown() bool {
-	return m.ctx.View == config.NotificationsView && m.sidebar.IsOpen &&
+	return m.ctx.View == config.NotificationsView &&
 		(m.notificationView.GetSubjectPR() != nil || m.notificationView.GetSubjectIssue() != nil)
 }
 
@@ -2337,112 +2378,11 @@ func (m *Model) syncSidebar() tea.Cmd {
 		m.notificationView.StopLoading()
 		m.sidebar.ClearSearch()
 		keys.SetNotificationSubject(keys.NotificationSubjectNone)
-		// Show prompt to view notification (don't auto-fetch)
-		// User must press Enter to view content and mark as read
-		m.sidebar.SetContent(m.renderNotificationPrompt(row))
+		// Don't auto-fetch: the user must press Enter to view content and mark as read
+		m.sidebar.SetContent("")
 	}
 
 	return cmd
-}
-
-func (m *Model) renderNotificationPrompt(row *notificationrow.Data) string {
-	var content strings.Builder
-
-	subjectType := row.GetSubjectType()
-	leftMargin := "      " // Left margin for content
-
-	// Styles
-	normalText := lipgloss.NewStyle().Foreground(m.ctx.Theme.PrimaryText)
-	faintText := lipgloss.NewStyle().Foreground(m.ctx.Theme.FaintText)
-	// Highlighted key style for main prompt (with background)
-	highlightKeyStyle := lipgloss.NewStyle().
-		Foreground(m.ctx.Theme.PrimaryText).
-		Background(m.ctx.Theme.FaintBorder).
-		Padding(0, 1)
-	// Simple key style for table (no background)
-	keyStyle := lipgloss.NewStyle().
-		Foreground(m.ctx.Theme.PrimaryText)
-	actionStyle := lipgloss.NewStyle().Foreground(m.ctx.Theme.SuccessText)
-	headerStyle := lipgloss.NewStyle().
-		Foreground(m.ctx.Theme.PrimaryText).
-		Bold(true)
-
-	// Determine subject type display name and primary action
-	typeName := "PR"
-	enterAction := "view"
-	if subjectType == "Issue" {
-		typeName = "Issue"
-	} else if subjectType != "PullRequest" {
-		typeName = subjectType
-		enterAction = "open in browser"
-	}
-
-	// Main prompt: "Press Enter to view the PR" or "Press Enter to open in browser"
-	content.WriteString("\n")
-	content.WriteString(leftMargin)
-	content.WriteString(normalText.Render("Press "))
-	content.WriteString(highlightKeyStyle.Render("Enter"))
-	if enterAction == "view" {
-		content.WriteString(normalText.Render(fmt.Sprintf(" to %s the %s", enterAction, typeName)))
-	} else {
-		content.WriteString(normalText.Render(fmt.Sprintf(" to %s", enterAction)))
-	}
-	content.WriteString("\n")
-
-	// Note about marking as read
-	content.WriteString(leftMargin)
-	content.WriteString(faintText.Render("(Note: this will mark it as read)"))
-	content.WriteString("\n")
-
-	content.WriteString("\n")
-
-	// Other Actions header
-	content.WriteString(leftMargin)
-	content.WriteString(headerStyle.Render("Other Actions"))
-	content.WriteString("\n\n")
-
-	// Key-action pairs (simple list without borders)
-	actions := []struct {
-		key    string
-		action string
-	}{
-		{"D", "mark as done"},
-		{"m", "mark as read"},
-		{"u", "unsubscribe"},
-		{"b", "toggle bookmark"},
-		{"t", "toggle filtering"},
-		{"S", "sort by repo"},
-		{"o", "open in browser"},
-	}
-
-	keyWidth := 7 // Width for key column
-	for _, a := range actions {
-		content.WriteString(leftMargin)
-		// Right-align the key in its column
-		padding := strings.Repeat(" ", keyWidth-len(a.key))
-		content.WriteString(padding)
-		content.WriteString(keyStyle.Render(a.key))
-		content.WriteString("  ")
-		content.WriteString(actionStyle.Render(a.action))
-		content.WriteString("\n")
-	}
-
-	// Add Enter and Esc at the end
-	content.WriteString(leftMargin)
-	padding := strings.Repeat(" ", keyWidth-len("Enter"))
-	content.WriteString(padding)
-	content.WriteString(keyStyle.Render("Enter"))
-	content.WriteString("  ")
-	content.WriteString(actionStyle.Render(enterAction))
-	content.WriteString("\n")
-	content.WriteString(leftMargin)
-	escPadding := strings.Repeat(" ", keyWidth-len("Esc"))
-	content.WriteString(escPadding)
-	content.WriteString(keyStyle.Render("Esc"))
-	content.WriteString("  ")
-	content.WriteString(actionStyle.Render("go back"))
-
-	return content.String()
 }
 
 // loadNotificationContent fetches and displays notification content, marking it as read
@@ -2602,6 +2542,13 @@ func (m *Model) switchToView(view config.ViewType) tea.Cmd {
 		m.notificationView.ClearSubject()
 	}
 
+	// The notifications view has no preview, so keep whether it's open for
+	// the other views
+	if m.ctx.View == config.NotificationsView && view != config.NotificationsView {
+		m.sidebar.IsOpen = m.previewOpen
+	} else if m.ctx.View != config.NotificationsView && view == config.NotificationsView {
+		m.previewOpen = m.sidebar.IsOpen
+	}
 	m.ctx.View = view
 
 	m.syncMainContentDimensions()

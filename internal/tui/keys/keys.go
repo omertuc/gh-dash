@@ -123,18 +123,19 @@ func (k KeyMap) NavigationKeys() []key.Binding {
 }
 
 func (k KeyMap) AppKeys() []key.Binding {
-	return []key.Binding{
-		k.Refresh,
-		k.RefreshAll,
-		k.TogglePreview,
-		k.TogglePreviewPosition,
+	bindings := []key.Binding{k.Refresh, k.RefreshAll}
+	// Notifications have no preview
+	if k.viewType != config.NotificationsView {
+		bindings = append(bindings, k.TogglePreview, k.TogglePreviewPosition)
+	}
+	return append(bindings,
 		k.OpenGithub,
 		k.CopyNumber,
 		k.CopyUrl,
 		k.Search,
 		k.NewSection,
 		k.RemoveSection,
-	}
+	)
 }
 
 func (k KeyMap) QuitAndHelpKeys() []key.Binding {

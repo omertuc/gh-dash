@@ -7,6 +7,8 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
 )
 
 var openEditorKey = key.NewBinding(
@@ -49,7 +51,7 @@ func openInEditor(value string) tea.Cmd {
 
 	args := append(editorCommand(), path)
 	c := exec.Command(args[0], args[1:]...)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
+	return keys.ExecProcess(c, func(err error) tea.Msg {
 		return editorFinishedMsg{path: path, err: err}
 	})
 }

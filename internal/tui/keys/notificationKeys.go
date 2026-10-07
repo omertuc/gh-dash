@@ -26,6 +26,7 @@ type NotificationKeyMap struct {
 	DeleteComment        key.Binding
 	ViewCommitFiles      key.Binding
 	OpenCheck            key.Binding
+	CheckCommands        key.Binding
 	ActivateItem         key.Binding
 	ContinueDraft        key.Binding
 	DiscardDraft         key.Binding
@@ -103,6 +104,12 @@ var NotificationKeys = NotificationKeyMap{
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "open check in browser"),
 	),
+	// Only while a check that plugins offer commands on is focused in an
+	// open notification's PR, e.g. rerunning its job
+	CheckCommands: key.NewBinding(
+		key.WithKeys("."),
+		key.WithHelp(".", "act on check"),
+	),
 	// Only while an item of a plugin's tab is focused in an open
 	// notification's PR, e.g. a button loading more tests
 	ActivateItem: key.NewBinding(
@@ -147,6 +154,7 @@ func NotificationFullHelp() []key.Binding {
 		NotificationKeys.DeleteComment,
 		NotificationKeys.ViewCommitFiles,
 		NotificationKeys.OpenCheck,
+		NotificationKeys.CheckCommands,
 		NotificationKeys.ActivateItem,
 		NotificationKeys.ContinueDraft,
 		NotificationKeys.DiscardDraft,
@@ -212,6 +220,8 @@ func rebindNotificationKeys(keys []config.Keybinding) error {
 			key = &NotificationKeys.ViewCommitFiles
 		case "openCheck":
 			key = &NotificationKeys.OpenCheck
+		case "checkCommands":
+			key = &NotificationKeys.CheckCommands
 		case "activateItem":
 			key = &NotificationKeys.ActivateItem
 		case "continueDraft":

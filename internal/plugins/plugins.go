@@ -8,7 +8,7 @@
 //	    options: {}
 //
 // A plugin implements Plugin and any of the capability interfaces that it
-// needs: CommentCommander, PanelProvider and CheckOpener.
+// needs: CommentCommander, PanelProvider, CheckOpener and CheckCommander.
 package plugins
 
 import (
@@ -59,6 +59,26 @@ type CheckOpener interface {
 	CheckAction(check Check) (label string, ok bool)
 	// OpenCheck returns the view shown in the check's tab.
 	OpenCheck(pr PR, check Check) View
+}
+
+// CheckCommander offers commands about one of a PR's checks, e.g. "/test
+// e2e-aws" to rerun its job. They're offered while the check is focused in
+// the PR's checks tab, and posted as a comment on the PR once picked.
+type CheckCommander interface {
+	CheckCommands(pr PR, check Check) []CheckCommand
+}
+
+// CheckCommand is a command offered on a check.
+type CheckCommand struct {
+	// Key picks the command once the check's commands are shown, e.g. "t"
+	Key string
+	// Label is what the command does, shown after its key, e.g. "rerun"
+	Label string
+	// Comment is what's posted on the PR, e.g. "/test e2e-aws"
+	Comment string
+	// Confirm asks before posting the comment, for commands that are hard
+	// to take back, e.g. overriding a status
+	Confirm bool
 }
 
 var (
@@ -168,6 +188,27 @@ func CheckOpenerFor(check Check) (CheckOpener, string, bool) {
 		}
 	}
 	return nil, "", false
+}
+
+// CheckCommands gathers the commands the enabled plugins offer on pr's
+// check. A key picks the first command offered with it.
+func CheckCommands(pr PR, check Check) []CheckCommand {
+	var commands []CheckCommand
+	seen := map[string]bool{}
+	for _, p := range Enabled() {
+		c, ok := p.(CheckCommander)
+		if !ok {
+			continue
+		}
+		for _, command := range c.CheckCommands(pr, check) {
+			if command.Key == "" || seen[command.Key] {
+				continue
+			}
+			seen[command.Key] = true
+			commands = append(commands, command)
+		}
+	}
+	return commands
 }
 
 // OpenURLMsg asks gh-dash to open a URL in the browser. Views return it from

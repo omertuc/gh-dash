@@ -86,7 +86,9 @@ type Model struct {
 	// whether the user explicitly hid the suggestions; when true
 	// Show() will not re-open the popup automatically until Unsuppress()
 	hiddenByUser bool
-	Source       Source
+	// whether the user moved the selection since the popup was last shown
+	navigated bool
+	Source    Source
 }
 
 func NewModel(ctx *context.ProgramContext, src Source) Model {
@@ -161,6 +163,7 @@ func (m *Model) Filter(input string, cmpCtx Context, excludeItems []string) {
 
 func (m *Model) Show() {
 	m.selected = 0
+	m.navigated = false
 	m.visible = true
 	if !m.hiddenByUser {
 		m.visible = true
@@ -181,6 +184,7 @@ func (m *Model) Selected() string {
 func (m *Model) Next() {
 	if len(m.filtered) > 0 {
 		m.selected = (m.selected + 1) % len(m.filtered)
+		m.navigated = true
 	}
 }
 
@@ -192,6 +196,13 @@ func (m *Model) Prev() {
 	if m.selected < 0 {
 		m.selected = len(m.filtered) - 1
 	}
+	m.navigated = true
+}
+
+// Navigated reports whether the user moved the selection since the popup
+// was last shown.
+func (m *Model) Navigated() bool {
+	return m.navigated
 }
 
 func (m *Model) Hide() {
@@ -204,6 +215,7 @@ func (m *Model) Hide() {
 func (m *Model) Reset() {
 	m.filtered = nil
 	m.selected = 0
+	m.navigated = false
 	m.visible = false
 	m.hiddenByUser = false
 }

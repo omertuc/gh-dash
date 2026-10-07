@@ -305,3 +305,38 @@ func TestThousands(t *testing.T) {
 		require.Equal(t, want, thousands(n), fmt.Sprint(n))
 	}
 }
+
+func commandComments(commands []plugins.CheckCommand) []string {
+	var comments []string
+	for _, c := range commands {
+		comments = append(comments, c.Comment)
+	}
+	return comments
+}
+
+func TestCheckCommands(t *testing.T) {
+	p := New()
+	pr := newTestPR(t, prowStatuses(), nil)
+	checks := pr.Checks()
+
+	// A failed job can be rerun, or overridden once confirmed
+	failed := p.CheckCommands(pr, checks[2])
+	require.Equal(t, []string{"/test e2e-aws", "/override ci/prow/e2e-aws"},
+		commandComments(failed))
+	require.False(t, failed[0].Confirm)
+	require.True(t, failed[1].Confirm)
+
+	// A passed job only needs rerunning
+	require.Equal(t, []string{"/test unit"}, commandComments(p.CheckCommands(pr, checks[1])))
+
+	require.Empty(t, p.CheckCommands(pr, checks[0]), "tide can't be rerun or overridden")
+
+	// A required job that wasn't reported yet can be run or overridden
+	require.Equal(t, []string{"/test images", "/override ci/prow/images"}, commandComments(p.CheckCommands(pr,
+		plugins.Check{Name: "ci/prow/images", State: "EXPECTED", Required: true})))
+
+	other := newTestPR(t, []testStatus{
+		{context: "build", state: "FAILURE", url: "https://github.com/o/r/actions/runs/1"},
+	}, nil)
+	require.Empty(t, p.CheckCommands(other, other.Checks()[0]), "Prow doesn't manage the PR")
+}

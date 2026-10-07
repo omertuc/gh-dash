@@ -107,7 +107,7 @@ func NewModel(ctx *context.ProgramContext) Model {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	cmd, handled := m.editor.Update(msg)
 
-	if msg, ok := msg.(tea.KeyMsg); ok && msg.String() == "ctrl+d" {
+	if msg, ok := msg.(tea.KeyMsg); ok && key.Matches(msg, inputbox.SubmitKey) {
 		value := m.editor.Value()
 		mode := m.editor.Mode()
 		m.editor.Exit()
