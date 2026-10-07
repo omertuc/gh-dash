@@ -295,6 +295,9 @@ func MarkNotificationRead(threadId string) error {
 		return err
 	}
 	log.Info("Successfully marked notification as read", "threadId", threadId)
+	// Only notifications that aren't done are shown, so one being read has
+	// resurfaced. Keep it shown once it's no longer unread.
+	GetDoneStore().Remove(threadId)
 	return nil
 }
 

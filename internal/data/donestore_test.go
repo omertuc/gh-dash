@@ -67,8 +67,8 @@ func TestDoneStore(t *testing.T) {
 		store, _ := newTestDoneStore(t)
 		store.MarkDone("id1", baseTime)
 		later := baseTime.Add(time.Hour)
-		readAfterDone := baseTime.Add(30 * time.Minute)
-		readBeforeDone := baseTime.Add(-30 * time.Minute)
+		// Marking done reads the thread, so last_read_at is after the done mark
+		readAtDone := baseTime.Add(5 * time.Minute)
 
 		cases := []struct {
 			name string
@@ -79,14 +79,9 @@ func TestDoneStore(t *testing.T) {
 			{"updated, unread", NotificationData{Id: "id1", UpdatedAt: later, Unread: true}, false},
 			{"updated, never read", NotificationData{Id: "id1", UpdatedAt: later}, true},
 			{
-				"updated, read before done",
-				NotificationData{Id: "id1", UpdatedAt: later, LastReadAt: &readBeforeDone},
+				"updated, read when marked done",
+				NotificationData{Id: "id1", UpdatedAt: later, LastReadAt: &readAtDone},
 				true,
-			},
-			{
-				"updated, read after done",
-				NotificationData{Id: "id1", UpdatedAt: later, LastReadAt: &readAfterDone},
-				false,
 			},
 			{"unknown", NotificationData{Id: "unknown", UpdatedAt: baseTime}, false},
 		}

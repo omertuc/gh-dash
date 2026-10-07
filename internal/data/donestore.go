@@ -208,11 +208,11 @@ func (s *DoneStore) IsDone(id string, updatedAt time.Time) bool {
 }
 
 // IsNotificationDone is IsDone, except that a notification updated since it was
-// marked done stays done if GitHub never made it unread again. Activity that
-// isn't meant for the user (e.g. a merge on a thread they unsubscribed from)
+// marked done stays done unless GitHub made it unread again. Activity that
+// isn't meant for the user (e.g. a push to a thread they unsubscribed from)
 // bumps updated_at without making the thread unread; activity that is (e.g. a
-// mention, which also resubscribes them) makes it unread, and reading it then
-// leaves last_read_at after the done mark, so it keeps showing.
+// mention, which also resubscribes them) makes it unread. Reading it then
+// removes the done mark (see MarkNotificationRead), so it keeps showing.
 func (s *DoneStore) IsNotificationDone(n NotificationData) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -220,10 +220,7 @@ func (s *DoneStore) IsNotificationDone(n NotificationData) bool {
 	if !ok {
 		return false
 	}
-	if !n.UpdatedAt.After(doneAt) {
-		return true
-	}
-	return !n.Unread && (n.LastReadAt == nil || !n.LastReadAt.After(doneAt))
+	return !n.UpdatedAt.After(doneAt) || !n.Unread
 }
 
 // Remove removes a notification from the done store.
