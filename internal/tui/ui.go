@@ -112,6 +112,10 @@ type Model struct {
 	// prerendered holds the notification subjects whose markdown has been
 	// rendered ahead of being opened
 	prerendered map[prerenderKey]bool
+
+	// pendingNotificationId is the notification to open once a section has
+	// a row for it, as asked for on the command line
+	pendingNotificationId string
 }
 
 type Mode int
@@ -166,6 +170,41 @@ func NewModel(location config.Location, repos Repositories) Model {
 	m.tabs = tabs.NewModel(m.ctx)
 
 	return m
+}
+
+// OpenNotificationOnStart starts in the notifications view and opens the
+// notification with the given thread id once it's fetched.
+func (m *Model) OpenNotificationOnStart(id string) {
+	m.pendingNotificationId = id
+}
+
+// openPendingNotification opens the notification asked for on the command
+// line once a section has a row for it. It stops looking once every section
+// is done loading without one.
+func (m *Model) openPendingNotification() tea.Cmd {
+	if m.pendingNotificationId == "" || m.ctx.View != config.NotificationsView ||
+		m.ctx.ScreenHeight == 0 {
+		return nil
+	}
+	loading := false
+	for i, s := range m.notifications {
+		ns, ok := s.(*notificationssection.Model)
+		if !ok {
+			continue
+		}
+		if ns.SelectNotification(m.pendingNotificationId) {
+			m.pendingNotificationId = ""
+			m.setCurrSectionId(i)
+			rowCmd := m.onViewedRowChanged()
+			return tea.Batch(rowCmd, m.loadNotificationContent())
+		}
+		loading = loading || ns.GetIsLoading()
+	}
+	if !loading {
+		log.Warn("notification to open not found", "id", m.pendingNotificationId)
+		m.pendingNotificationId = ""
+	}
+	return nil
 }
 
 func (m *Model) initScreen() tea.Msg {
@@ -267,6 +306,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		log.Info("Key pressed", "key", msg.String())
 		m.ctx.Error = nil
+		// Don't jump away from wherever the user went in the meantime
+		m.pendingNotificationId = ""
 
 		if currSection != nil && (currSection.IsSearchFocused() ||
 			currSection.IsPromptConfirmationFocused()) {
@@ -941,6 +982,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Background(m.ctx.Theme.SelectedBackground)
 
 		m.ctx.View = m.ctx.Config.Defaults.View
+		if m.pendingNotificationId != "" {
+			m.ctx.View = config.NotificationsView
+		}
 		m.currSectionId = 0
 		m.sidebar.IsOpen = msg.Config.Defaults.Preview.Open
 		m.previewOpen = m.sidebar.IsOpen
@@ -964,7 +1008,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		cmds = append(cmds, fetchSectionsCmds, m.tabs.Init(), fetchUser,
-			m.doRefreshAtInterval(), m.doUpdateFooterAtInterval())
+			m.doRefreshAtInterval(), m.doUpdateFooterAtInterval(),
+			// It may be among the rows cached from last time
+			m.openPendingNotification())
 		if !m.watchingDoneStore {
 			if err := data.GetDoneStore().Watch(); err != nil {
 				log.Error("Failed to watch done notifications store", "err", err)
@@ -1035,6 +1081,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, syncCmd)
 			// The open notification may no longer be the current one
 			cmds = append(cmds, m.syncPreviewFullscreen())
+			cmds = append(cmds, m.openPendingNotification())
 		}
 
 	case constants.TaskStartedMsg:

@@ -66,6 +66,9 @@ gh dash
 # Run with a specific configuration file
 gh dash --config /path/to/configuration/file.yml
 
+# Open the notification with thread id 123
+gh dash --notification 123
+
 # Run with debug logging to debug.log
 gh dash --debug
 
@@ -174,6 +177,12 @@ func init() {
 	)
 
 	rootCmd.Flags().String(
+		"notification",
+		"",
+		"open the notification with this thread id",
+	)
+
+	rootCmd.Flags().String(
 		"cpuprofile",
 		"",
 		"write cpu profile to file",
@@ -244,6 +253,10 @@ func init() {
 			config.Location{RepoPath: gitRepoPath, ConfigFlag: cfgFlag},
 			tui.Repositories{GitRepo: gitRepo, GHRepo: &ghRepo},
 		)
+
+		if notificationId, _ := rootCmd.Flags().GetString("notification"); notificationId != "" {
+			model.OpenNotificationOnStart(notificationId)
+		}
 
 		cpuprofile, err := rootCmd.Flags().GetString("cpuprofile")
 		if err != nil {

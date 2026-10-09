@@ -605,6 +605,18 @@ func (m *Model) GetCurrNotification() *notificationrow.Data {
 	return &m.Notifications[idx]
 }
 
+// SelectNotification moves to the notification with the given id, returning
+// whether it's in this section.
+func (m *Model) SelectNotification(id string) bool {
+	for i, n := range m.Notifications {
+		if n.GetId() == id {
+			m.Table.SelectItem(i)
+			return true
+		}
+	}
+	return false
+}
+
 // NotificationsNearCursor returns the notifications from before rows above
 // the current one to after rows below it, nearest first: the current one,
 // then those below it, then those above it.
