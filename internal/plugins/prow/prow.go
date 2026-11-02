@@ -2,8 +2,10 @@
 // (https://docs.prow.k8s.io), e.g. Kubernetes' and OpenShift's. It offers
 // Prow's commands while writing a comment, shows who approved a PR and what
 // still needs approving, browses a Prow job's test results, and reruns or
-// overrides a PR's checks. The test results of a PR's failed jobs are
-// prefetched once it's shown, so they're there once a job is opened.
+// overrides a PR's checks. When a PR needs a rebase, a tab lists the files it
+// conflicts in, found by merging it in the repo's local clone. The test
+// results of a PR's failed jobs are prefetched once it's shown, so they're
+// there once a job is opened.
 package prow
 
 import (
@@ -42,6 +44,9 @@ type Plugin struct {
 
 	cacheOnce sync.Once
 	cache     *resultsCache
+
+	conflictsOnce sync.Once
+	conflicts     *conflictsCache
 }
 
 // New returns the plugin with its default options.

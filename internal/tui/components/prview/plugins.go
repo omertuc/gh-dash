@@ -1,6 +1,7 @@
 package prview
 
 import (
+	"slices"
 	"sync/atomic"
 
 	tea "charm.land/bubbletea/v2"
@@ -11,15 +12,27 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/fuzzyselect"
 )
 
-// pluginTab is a plugin's view shown in a tab of its own.
+// pluginTab is a plugin's view shown in a tab of its own: one a plugin shows
+// for the PR, or one a check was opened in.
 type pluginTab struct {
 	// id tells the view's messages apart from those of views opened before
-	id   int64
+	id int64
+	// view is nil until a PR's tab is first selected
 	view plugins.View
-	// check is the check the view was opened from
-	check plugins.Check
+	// check is the check the view was opened from, for a check's tab
+	check *plugins.Check
+	// prTab is the plugin and which of its tabs it is, for a PR's tab
+	prTab plugins.PluginTab
 	// items are the view's focusable items as last rendered
 	items []plugins.Item
+}
+
+// title is the tab's name: its view's once it's open.
+func (t *pluginTab) title() string {
+	if t.view != nil {
+		return t.view.Title()
+	}
+	return t.prTab.Title
 }
 
 var lastPluginViewId atomic.Int64
@@ -56,6 +69,74 @@ func (m *Model) commentSource() fuzzyselect.Source {
 		suggestions = append(suggestions, fuzzyselect.Suggestion{Value: c.Text, Detail: c.Description})
 	}
 	return &fuzzyselect.CommandSource{Commands: suggestions, Fallback: mentions}
+}
+
+// pluginTabs lists the plugins' tabs in the order they're shown, after the
+// built-in ones: the PR's, then the one a check was opened in.
+func (m Model) pluginTabs() []*pluginTab {
+	if m.checkTab == nil {
+		return m.prTabs
+	}
+	return append(slices.Clone(m.prTabs), m.checkTab)
+}
+
+// selectedPluginTab returns the plugin's tab that's selected, if any.
+func (m Model) selectedPluginTab() *pluginTab {
+	tabs := m.pluginTabs()
+	if i := m.carousel.Cursor() - firstPluginTab; i >= 0 && i < len(tabs) {
+		return tabs[i]
+	}
+	return nil
+}
+
+// pluginTabIndex returns the index of a plugin's tab among all the tabs, or
+// -1 when it isn't shown.
+func (m Model) pluginTabIndex(tab *pluginTab) int {
+	if i := slices.Index(m.pluginTabs(), tab); i >= 0 {
+		return firstPluginTab + i
+	}
+	return -1
+}
+
+// syncPluginTabs shows the tabs the enabled plugins show for the PR, e.g. its
+// conflicts, keeping those already shown along with what they show. The
+// selected tab stays selected, or the files tab is when it's gone.
+func (m *Model) syncPluginTabs() {
+	selected := m.selectedPluginTab()
+	var tabs []*pluginTab
+	if m.hasData() {
+		for _, t := range plugins.Tabs(m.pluginPR()) {
+			i := slices.IndexFunc(m.prTabs, func(tab *pluginTab) bool {
+				return tab.prTab.Provider == t.Provider && tab.prTab.Key == t.Key
+			})
+			if i >= 0 {
+				tabs = append(tabs, m.prTabs[i])
+			} else {
+				tabs = append(tabs, &pluginTab{id: lastPluginViewId.Add(1), prTab: t})
+			}
+		}
+	}
+	m.prTabs = tabs
+	m.syncTabs()
+	if selected == nil {
+		return
+	}
+	if i := m.pluginTabIndex(selected); i >= 0 {
+		m.carousel.SetCursor(i)
+	} else {
+		m.carousel.SetCursor(filesTab)
+	}
+}
+
+// openPluginTab opens a PR's tab once it's first selected, returning the
+// command starting its view.
+func (m *Model) openPluginTab(tab *pluginTab) tea.Cmd {
+	if tab == nil || tab.view != nil {
+		return nil
+	}
+	tab.view = tab.prTab.Provider.OpenTab(plugins.Env{Ctx: m.ctx}, m.pluginPR(), tab.prTab.Key)
+	m.syncTabs()
+	return m.wrapPluginCmd(tab, tab.view.Init())
 }
 
 // renderPluginPanels renders the panels the enabled plugins show in the
@@ -154,17 +235,18 @@ func (m *Model) OpenCheckInPlugin(i int) (tea.Cmd, bool) {
 	if !ok {
 		return nil, false
 	}
-	view := opener.OpenCheck(m.pluginPR(), items[i].check)
-	m.pluginTab = &pluginTab{id: lastPluginViewId.Add(1), view: view, check: items[i].check}
+	check := items[i].check
+	view := opener.OpenCheck(m.pluginPR(), check)
+	m.checkTab = &pluginTab{id: lastPluginViewId.Add(1), view: view, check: &check}
 	m.syncTabs()
-	m.setTab(pluginViewTab)
-	return m.wrapPluginCmd(view.Init()), true
+	m.setTab(m.pluginTabIndex(m.checkTab))
+	return m.wrapPluginCmd(m.checkTab, view.Init()), true
 }
 
-// wrapPluginCmd wraps the messages of the plugin view's command so they find
-// their way back to it.
-func (m *Model) wrapPluginCmd(cmd tea.Cmd) tea.Cmd {
-	id := m.pluginTab.id
+// wrapPluginCmd wraps the messages of the command of a plugin tab's view so
+// they find their way back to it.
+func (m *Model) wrapPluginCmd(tab *pluginTab, cmd tea.Cmd) tea.Cmd {
+	id := tab.id
 	return plugins.WrapCmd(cmd, func(msg tea.Msg) tea.Msg {
 		return PluginViewMsg{Id: id, Msg: msg}
 	})
@@ -173,16 +255,23 @@ func (m *Model) wrapPluginCmd(cmd tea.Cmd) tea.Cmd {
 // UpdatePluginView delivers a message to the plugin view it's meant for. It
 // reports whether the view is still open to take it.
 func (m *Model) UpdatePluginView(msg PluginViewMsg) (tea.Cmd, bool) {
-	if m.pluginTab == nil || m.pluginTab.id != msg.Id {
+	i := slices.IndexFunc(m.pluginTabs(), func(tab *pluginTab) bool {
+		return tab.id == msg.Id && tab.view != nil
+	})
+	if i < 0 {
 		return nil, false
 	}
-	return m.wrapPluginCmd(m.pluginTab.view.Update(msg.Msg)), true
+	tab := m.pluginTabs()[i]
+	cmd := m.wrapPluginCmd(tab, tab.view.Update(msg.Msg))
+	// e.g. its title counts what it found
+	m.syncTabs()
+	return cmd, true
 }
 
 // viewPluginTab renders the plugin's view along with where its items start.
-func (m Model) viewPluginTab() (string, []common.CommentAnchor) {
-	body, items := m.pluginTab.view.Render(plugins.Env{Ctx: m.ctx}, m.getIndentedContentWidth())
-	m.pluginTab.items = items
+func (m Model) viewPluginTab(tab *pluginTab) (string, []common.CommentAnchor) {
+	body, items := tab.view.Render(plugins.Env{Ctx: m.ctx}, m.getIndentedContentWidth())
+	tab.items = items
 	anchors := make([]common.CommentAnchor, 0, len(items))
 	for i, it := range items {
 		idx := i
@@ -193,34 +282,51 @@ func (m Model) viewPluginTab() (string, []common.CommentAnchor) {
 
 // IsPluginTab reports whether a plugin's view is the selected tab.
 func (m Model) IsPluginTab() bool {
-	return m.pluginTab != nil && m.carousel.Cursor() == pluginViewTab
+	tab := m.selectedPluginTab()
+	return tab != nil && tab.view != nil
 }
 
-// PluginItem returns the plugin view's item at the given index, as last
-// rendered.
+// PluginItem returns the selected plugin view's item at the given index, as
+// last rendered.
 func (m Model) PluginItem(i int) (plugins.Item, bool) {
-	if m.pluginTab == nil || i < 0 || i >= len(m.pluginTab.items) {
+	tab := m.selectedPluginTab()
+	if tab == nil || i < 0 || i >= len(tab.items) {
 		return plugins.Item{}, false
 	}
-	return m.pluginTab.items[i], true
+	return tab.items[i], true
 }
 
-// SetFocusedPluginItem tells the plugin's view which of its items is
-// focused, or -1 for none. It reports whether the view changed.
+// SetFocusedPluginItem tells the selected plugin's view which of its items
+// is focused, or -1 for none. It reports whether the view changed.
 func (m *Model) SetFocusedPluginItem(i int) bool {
-	if m.pluginTab == nil {
+	tab := m.selectedPluginTab()
+	if tab == nil || tab.view == nil {
 		return false
 	}
-	return m.pluginTab.view.Focus(i)
+	return tab.view.Focus(i)
 }
 
-// ActivatePluginItem acts on the plugin view's item at the given index,
-// e.g. a button loading more tests.
+// ActivatePluginItem acts on the selected plugin view's item at the given
+// index, e.g. a button loading more tests.
 func (m *Model) ActivatePluginItem(i int) tea.Cmd {
-	if m.pluginTab == nil {
+	tab := m.selectedPluginTab()
+	if tab == nil || tab.view == nil {
 		return nil
 	}
-	return m.wrapPluginCmd(m.pluginTab.view.Activate(i))
+	return m.wrapPluginCmd(tab, tab.view.Activate(i))
+}
+
+// PluginTabDiff returns the diff of the selected plugin's view, when it has
+// one to show instead of the PR's, e.g. the PR's conflicts.
+func (m Model) PluginTabDiff() (string, bool) {
+	tab := m.selectedPluginTab()
+	if tab == nil {
+		return "", false
+	}
+	if d, ok := tab.view.(plugins.Differ); ok {
+		return d.Diff()
+	}
+	return "", false
 }
 
 // CheckCommands returns the name of the check at the given index, as listed,
@@ -242,10 +348,11 @@ func (m *Model) CheckCommands(i int) (string, []plugins.CheckCommand) {
 // selected, along with the commands the enabled plugins offer on it as it's
 // listed now, e.g. rerunning its job.
 func (m *Model) PluginTabCheckCommands() (string, []plugins.CheckCommand) {
-	if !m.IsPluginTab() || !m.hasData() {
+	tab := m.selectedPluginTab()
+	if tab == nil || tab.check == nil || !m.hasData() {
 		return "", nil
 	}
-	check := m.pluginTab.check
+	check := *tab.check
 	for _, it := range m.checkItems() {
 		if it.check.Name == check.Name {
 			// Its state may have changed since, e.g. once it was rerun

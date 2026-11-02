@@ -454,6 +454,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			i, _ := m.focusedPluginItem()
 			return m, m.activatePluginItem(i)
 
+		// With a plugin's tab of the shown PR selected that has a diff of its
+		// own, e.g. the PR's conflicts, show it rather than the PR's
+		case key.Matches(msg, keys.PRKeys.Diff) && m.hasPluginTabDiff():
+			return m, m.showPluginTabDiff()
+
 		// With a check focused in an open notification's PR, or its tab
 		// selected, show the commands plugins offer on it, e.g. rerunning its
 		// job
@@ -482,9 +487,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// There's nothing further left, so go back to the list
 					return m, m.backToNotification()
 				}
-				m.prView.PrevTab()
+				cmds = append(cmds, m.prView.PrevTab())
 			} else {
-				m.prView.NextTab()
+				cmds = append(cmds, m.prView.NextTab())
 			}
 			m.syncSidebar()
 
@@ -1038,6 +1043,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case plugins.OpenURLMsg:
 		cmds = append(cmds, m.openUrlInBrowser(msg.URL))
+
+	case plugins.ShowDiffMsg:
+		cmds = append(cmds, common.PageDiff(msg.Diff, m.ctx.Config.GetDiffPager()))
 
 	case prview.CommitFilesMsg:
 		if msg.Err != nil {

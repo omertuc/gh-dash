@@ -86,6 +86,8 @@ func TestWrapCmd(t *testing.T) {
 	// Meant for gh-dash, so it's left as is
 	msg = WrapCmd(OpenURL("https://example.com"), wrap)()
 	require.Equal(t, OpenURLMsg{URL: "https://example.com"}, msg)
+	msg = WrapCmd(ShowDiff("diff --git a/f b/f"), wrap)()
+	require.Equal(t, ShowDiffMsg{Diff: "diff --git a/f b/f"}, msg)
 
 	batch := WrapCmd(tea.Batch(func() tea.Msg { return 1 }, func() tea.Msg { return 2 }), wrap)()
 	cmds, ok := batch.(tea.BatchMsg)

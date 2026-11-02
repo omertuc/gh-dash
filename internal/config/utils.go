@@ -6,7 +6,9 @@ import (
 	"strings"
 )
 
-func (cfg Config) GetFullScreenDiffPagerEnv() []string {
+// GetDiffPager returns the command diffs are shown with, e.g. "delta
+// --paging always".
+func (cfg Config) GetDiffPager() string {
 	diff := cfg.Pager.Diff
 	if diff == "" {
 		diff = "less"
@@ -14,6 +16,11 @@ func (cfg Config) GetFullScreenDiffPagerEnv() []string {
 	if diff == "delta" {
 		diff = "delta --paging always"
 	}
+	return diff
+}
+
+func (cfg Config) GetFullScreenDiffPagerEnv() []string {
+	diff := cfg.GetDiffPager()
 
 	env := os.Environ()
 	env = append(

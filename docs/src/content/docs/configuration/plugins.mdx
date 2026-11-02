@@ -31,6 +31,10 @@ Plugins can hook into these parts of `gh-dash`:
   mention.
 - **Overview panels**: show boxes of information in a PR's overview, e.g. who approved
   it.
+- **PR tabs**: show tabs of their own in a PR's view, after the built-in ones, e.g. the
+  files a PR conflicts in. A tab's content is loaded once you first switch to it. Its
+  items are focused and acted on like a check view's (below), and <kbd>d</kbd> (the `diff`
+  key) shows the tab's own diff in your diff pager instead of the PR's, when it has one.
 - **Check views**: open some of a PR's checks in a tab of their own, rather than in the
   browser, e.g. to browse a CI job's test results. With a notification's PR open, focus a
   check in the Checks tab and press <kbd>enter</kbd>. The focused check's hint says when a
@@ -61,6 +65,19 @@ whose checks link to Prow jobs, that Prow commented on or that have Prow's label
 - **Approvals**: a panel in the overview shows who LGTM'd the PR, who approved it and
   which `OWNERS` files still need approving and by whom, as summarized by Prow's approval
   comment, along with what blocks merging, like `do-not-merge/hold` or `needs-rebase`.
+- **Conflicts**: when a PR needs a rebase, because Prow labeled it `needs-rebase` or
+  GitHub found it conflicting, a Conflicts tab lists the files it conflicts in with its
+  target branch, and the kind of each conflict, e.g. `contents` or `modify/delete`.
+  <kbd>d</kbd> (the `diff` key) shows all the conflicts in your diff pager (the
+  `pager.diff` setting), and <kbd>enter</kbd> on a file shows just its own. They're shown
+  as how merging the PR would change the target branch, conflict markers and all.
+
+  The conflicts are found by merging the PR in your local clone of its repo, found
+  through [`repoPaths`](/configuration/repo-paths) or the repo `gh-dash` was started
+  from. The PR and its target branch are fetched from the clone's remote for the repo, and
+  merged with `git merge-tree`, which needs git 2.38 or newer and leaves your branches and
+  work tree as they are. Conflicts are kept for 10 minutes, or until the PR changes;
+  "Check again" looks for them anew.
 - **Test results**: opening a Prow job's check lists its tests, from the job's junit
   files, by how they went: failed, flaky (failed, then passed on a retry), passed and
   skipped. Failed tests are listed right away, while the rest are listed a page at a time

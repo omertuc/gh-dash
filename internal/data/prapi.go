@@ -56,7 +56,8 @@ type EnrichedPullRequestData struct {
 	Repository         Repository
 	Commits            LastCommitWithStatusChecks `graphql:"commits(last: 1)"`
 	AllCommits         AllCommits                 `graphql:"allCommits: commits(last: 100)"`
-	Comments           CommentsWithBody           `graphql:"comments(last: 50, orderBy: { field: UPDATED_AT, direction: DESC })"`
+	// The newest comments; FetchPullRequest pages back for the rest.
+	Comments           CommentsWithBody           `graphql:"comments(last: 100)"`
 	ReviewThreads      ReviewThreadsWithComments  `graphql:"reviewThreads(last: 50)"`
 	ReviewRequests     ReviewRequests             `graphql:"reviewRequests(last: 100)"`
 	Reviews            Reviews                    `graphql:"reviews(last: 100)"`
@@ -238,6 +239,10 @@ type LastCommitWithStatusChecks struct {
 type CommentsWithBody struct {
 	TotalCount graphql.Int
 	Nodes      []Comment
+	PageInfo   struct {
+		HasPreviousPage bool
+		StartCursor     string
+	}
 }
 
 type ContextCountByState = struct {
@@ -679,7 +684,36 @@ func FetchPullRequest(prUrl string) (EnrichedPullRequestData, error) {
 	if err != nil {
 		return EnrichedPullRequestData{}, err
 	}
+	pr := queryResult.Resource.PullRequest
+	if err := fetchOlderComments(parsedUrl, &pr.Comments); err != nil {
+		return EnrichedPullRequestData{}, err
+	}
 	log.Info("Successfully fetched PR", "url", prUrl)
 
-	return queryResult.Resource.PullRequest, nil
+	return pr, nil
+}
+
+// fetchOlderComments pages back through the PR's comments until comments
+// holds all of them, oldest first.
+func fetchOlderComments(prUrl *url.URL, comments *CommentsWithBody) error {
+	for comments.PageInfo.HasPreviousPage {
+		var queryResult struct {
+			Resource struct {
+				PullRequest struct {
+					Comments CommentsWithBody `graphql:"comments(last: 100, before: $before)"`
+				} `graphql:"... on PullRequest"`
+			} `graphql:"resource(url: $url)"`
+		}
+		variables := map[string]any{
+			"url":    githubv4.URI{URL: prUrl},
+			"before": graphql.String(comments.PageInfo.StartCursor),
+		}
+		if err := client.Query("FetchPullRequestComments", &queryResult, variables); err != nil {
+			return err
+		}
+		older := queryResult.Resource.PullRequest.Comments
+		comments.Nodes = append(older.Nodes, comments.Nodes...)
+		comments.PageInfo = older.PageInfo
+	}
+	return nil
 }

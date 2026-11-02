@@ -100,8 +100,8 @@ func (m *Model) onMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 		return tea.Batch(m.onViewedRowChanged(), m.resumeLoadingSpinner())
 	}
 
-	if m.prView.SelectTabAt(msg) {
-		return m.syncSidebar()
+	if cmd, ok := m.prView.SelectTabAt(msg); ok {
+		return tea.Batch(cmd, m.syncSidebar())
 	}
 
 	// Clicking a comment, commit or check in the preview focuses it

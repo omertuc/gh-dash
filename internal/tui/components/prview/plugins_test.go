@@ -100,3 +100,48 @@ func TestOpenCheckInPluginAddsATab(t *testing.T) {
 	require.False(t, m.IsPluginTab())
 	require.Len(t, m.carousel.Items(), len(tabs))
 }
+
+func TestPluginShowsATabWhenThePRNeedsARebase(t *testing.T) {
+	m := newProwTestModel(t, true)
+	require.Len(t, m.carousel.Items(), len(tabs))
+
+	// Prow labels it needs-rebase
+	var enriched data.EnrichedPullRequestData
+	require.NoError(t, json.Unmarshal([]byte(prowPRJSON), &enriched))
+	enriched.Url = "https://github.com/o/r/pull/1"
+	enriched.Labels.Nodes = append(enriched.Labels.Nodes, data.Label{Name: "needs-rebase"})
+	m.SetEnrichedPR(enriched)
+
+	require.Len(t, m.carousel.Items(), len(tabs)+1)
+	require.Contains(t, m.carousel.Items()[len(tabs)], "Conflicts")
+	require.False(t, m.IsPluginTab())
+
+	// It's opened once selected
+	m.setTab(len(tabs))
+	require.True(t, m.IsPluginTab())
+	body, _ := m.ViewBodyWithAnchors()
+	// The test has no local clone of the PR's repo
+	require.Contains(t, ansi.Strip(body), "Couldn't find the conflicts")
+	_, ok := m.PluginTabDiff()
+	require.False(t, ok)
+
+	// A check's tab comes after it, and the PR's tab stays as it was
+	m.setTab(checksTab)
+	_, opened := m.OpenCheckInPlugin(0)
+	require.True(t, opened)
+	require.Len(t, m.carousel.Items(), len(tabs)+2)
+	require.Equal(t, len(tabs)+1, m.carousel.Cursor())
+	conflicts := m.prTabs[0]
+	m.SetEnrichedPR(enriched)
+	require.Same(t, conflicts, m.prTabs[0])
+	require.Equal(t, len(tabs)+1, m.carousel.Cursor(), "the check's tab stays selected")
+
+	// Once rebased, the tab goes, with the check's tab still selected
+	enriched.Labels.Nodes = enriched.Labels.Nodes[:len(enriched.Labels.Nodes)-1]
+	m.SetEnrichedPR(enriched)
+	require.Len(t, m.carousel.Items(), len(tabs)+1)
+	require.Equal(t, len(tabs), m.carousel.Cursor())
+	require.True(t, m.IsPluginTab())
+	body, _ = m.ViewBodyWithAnchors()
+	require.Contains(t, ansi.Strip(body), "Open job in browser")
+}

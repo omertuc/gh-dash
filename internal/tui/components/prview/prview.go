@@ -53,9 +53,12 @@ type Model struct {
 	// commitFiles narrows the files tab to a commit's files, or is nil to show
 	// all of the PR's files
 	commitFiles *commitFiles
-	// pluginTab is a plugin's view of a check shown in a tab after the
-	// others, e.g. a CI job's tests, or nil when none was opened
-	pluginTab *pluginTab
+	// prTabs are the tabs plugins show for the PR, after the built-in ones,
+	// e.g. its conflicts
+	prTabs []*pluginTab
+	// checkTab is a plugin's view of a check shown in a tab after the others,
+	// e.g. a CI job's tests, or nil when none was opened
+	checkTab *pluginTab
 }
 
 // commitFiles are the files changed by a commit, shown in the files tab.
@@ -82,8 +85,9 @@ const (
 	commitsTab
 	checksTab
 	filesTab
-	// pluginViewTab is shown only once a plugin opened a check in it
-	pluginViewTab
+	// firstPluginTab is where the plugins' tabs start, when there are any:
+	// those they show for the PR, then one a check was opened in
+	firstPluginTab
 )
 
 func NewModel(ctx *context.ProgramContext) Model {
@@ -162,9 +166,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch {
 		case key.Matches(keyMsg, keys.PRKeys.PrevSidebarTab):
-			m.PrevTab()
+			cmd = tea.Batch(cmd, m.PrevTab())
 		case key.Matches(keyMsg, keys.PRKeys.NextSidebarTab):
-			m.NextTab()
+			cmd = tea.Batch(cmd, m.NextTab())
 		}
 	}
 
@@ -192,8 +196,8 @@ func (m Model) ViewBodyWithAnchors() (string, []common.CommentAnchor) {
 		return "", nil
 	}
 
-	if m.carousel.Cursor() == pluginViewTab && m.pluginTab != nil {
-		return m.viewPluginTab()
+	if tab := m.selectedPluginTab(); tab != nil && tab.view != nil {
+		return m.viewPluginTab(tab)
 	}
 
 	if m.carousel.Cursor() == activityTab {
@@ -779,7 +783,8 @@ func (m *Model) SetRow(d *prrow.Data) {
 		m.expandedCommit = ""
 		m.expandedCheck = ""
 		m.commitFiles = nil
-		m.pluginTab = nil
+		m.prTabs = nil
+		m.checkTab = nil
 		m.syncTabs()
 	}
 	if d == nil {
@@ -788,6 +793,7 @@ func (m *Model) SetRow(d *prrow.Data) {
 		m.pr = &prrow.PullRequest{Ctx: m.ctx, Data: d}
 		plugins.Prefetch(m.pluginPR())
 	}
+	m.syncPluginTabs()
 }
 
 type EnrichedPrMsg struct {
@@ -1037,33 +1043,39 @@ func (m *Model) GoToActivityTab() {
 	m.setTab(activityTab)
 }
 
-func (m *Model) PrevTab() {
-	m.setTab(max(0, m.carousel.Cursor()-1))
+// PrevTab selects the previous tab, returning the command starting its view
+// when it's a plugin's opened just now.
+func (m *Model) PrevTab() tea.Cmd {
+	return m.setTab(max(0, m.carousel.Cursor()-1))
 }
 
-func (m *Model) NextTab() {
-	m.setTab(min(len(m.carousel.Items())-1, m.carousel.Cursor()+1))
+// NextTab selects the next tab, the way PrevTab does.
+func (m *Model) NextTab() tea.Cmd {
+	return m.setTab(min(len(m.carousel.Items())-1, m.carousel.Cursor()+1))
 }
 
 // SelectTabAt selects the tab under the mouse. It reports whether the tab
-// changed.
-func (m *Model) SelectTabAt(msg tea.MouseMsg) bool {
+// changed, along with the command starting its view when it's a plugin's
+// opened just now.
+func (m *Model) SelectTabAt(msg tea.MouseMsg) (tea.Cmd, bool) {
 	tab := m.carousel.ItemAt(msg)
 	if tab < 0 || tab == m.carousel.Cursor() {
-		return false
+		return nil, false
 	}
-	m.setTab(tab)
-	return true
+	return m.setTab(tab), true
 }
 
-// setTab selects a tab. Leaving the files tab shows all of the PR's files
-// again. The expanded commit is kept, to focus it again on coming back.
-func (m *Model) setTab(tab int) {
+// setTab selects a tab, opening it when it's a plugin's that wasn't yet, and
+// returns the command starting its view. Leaving the files tab shows all of
+// the PR's files again. The expanded commit is kept, to focus it again on
+// coming back.
+func (m *Model) setTab(tab int) tea.Cmd {
 	m.carousel.SetCursor(tab)
 	if tab != filesTab {
 		m.commitFiles = nil
 	}
 	m.syncTabs()
+	return m.openPluginTab(m.selectedPluginTab())
 }
 
 // syncTabs names the tabs, with the files tab naming the commit it's narrowed
@@ -1073,8 +1085,8 @@ func (m *Model) syncTabs() {
 	if m.commitFiles != nil {
 		items[filesTab] += " (" + m.commitFiles.abbreviatedOid + ")"
 	}
-	if m.pluginTab != nil {
-		items = append(items, m.pluginTab.view.Title())
+	for _, tab := range m.pluginTabs() {
+		items = append(items, tab.title())
 	}
 	if slices.Equal(items, m.carousel.Items()) {
 		return
@@ -1184,6 +1196,7 @@ func (m *Model) SetEnrichedPR(data data.EnrichedPullRequestData) {
 		m.pr.Data.Enriched = data
 		m.pr.Data.IsEnriched = true
 		plugins.Prefetch(m.pluginPR())
+		m.syncPluginTabs()
 	}
 }
 

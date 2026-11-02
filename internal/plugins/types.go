@@ -165,6 +165,15 @@ type View interface {
 	Activate(item int) tea.Cmd
 }
 
+// Differ is a View with a diff of its own, shown in the user's diff pager
+// when the diff key is pressed in its tab instead of the PR's, e.g. the PR's
+// conflicts.
+type Differ interface {
+	// Diff returns the diff to show, or false to show the PR's as usual, e.g.
+	// while there's nothing to show yet
+	Diff() (string, bool)
+}
+
 // Item is something focusable in a view's content.
 type Item struct {
 	// Line is the line of the rendered content the item starts on

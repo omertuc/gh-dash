@@ -8,8 +8,8 @@
 //	    options: {}
 //
 // A plugin implements Plugin and any of the capability interfaces that it
-// needs: CommentCommander, PanelProvider, CheckOpener, CheckCommander and
-// Prefetcher.
+// needs: CommentCommander, PanelProvider, TabProvider, CheckOpener,
+// CheckCommander and Prefetcher.
 package plugins
 
 import (
@@ -50,6 +50,33 @@ type CommentCommand struct {
 // PanelProvider shows panels in a PR's overview, e.g. who approved it.
 type PanelProvider interface {
 	Panels(pr PR) []Panel
+}
+
+// TabProvider shows tabs of its own in a PR's view, after the built-in ones,
+// e.g. the files a PR conflicts in when it needs a rebase.
+type TabProvider interface {
+	// Tabs lists the tabs the plugin shows for pr. They're asked for whenever
+	// the PR is shown or its details arrive, so it mustn't block.
+	Tabs(pr PR) []Tab
+	// OpenTab returns the view shown in the tab with the given key. It's
+	// opened once the tab is first selected, and kept for as long as the PR
+	// lists the tab.
+	OpenTab(env Env, pr PR, key string) View
+}
+
+// Tab is a tab a plugin shows in a PR's view.
+type Tab struct {
+	// Key tells the plugin's tabs apart, e.g. "conflicts"
+	Key string
+	// Title is the tab's name until it's opened, after which its view's is
+	// shown, e.g. " Conflicts"
+	Title string
+}
+
+// PluginTab is a tab an enabled plugin shows in a PR's view.
+type PluginTab struct {
+	Tab
+	Provider TabProvider
 }
 
 // CheckOpener opens some of a PR's checks in a tab of their own, rather than
@@ -186,6 +213,19 @@ func Panels(pr PR) []Panel {
 	return panels
 }
 
+// Tabs gathers the tabs the enabled plugins show in pr's view.
+func Tabs(pr PR) []PluginTab {
+	var tabs []PluginTab
+	for _, p := range Enabled() {
+		if tp, ok := p.(TabProvider); ok {
+			for _, t := range tp.Tabs(pr) {
+				tabs = append(tabs, PluginTab{Tab: t, Provider: tp})
+			}
+		}
+	}
+	return tabs
+}
+
 // Prefetch asks the enabled plugins to fetch ahead what they'll likely be
 // asked to show about pr.
 func Prefetch(pr PR) {
@@ -241,6 +281,17 @@ func OpenURL(url string) tea.Cmd {
 	return func() tea.Msg { return OpenURLMsg{URL: url} }
 }
 
+// ShowDiffMsg asks gh-dash to show a diff in the user's diff pager, the way
+// it shows a PR's diff. Views return it from their commands.
+type ShowDiffMsg struct {
+	Diff string
+}
+
+// ShowDiff returns a command asking gh-dash to show diff in the diff pager.
+func ShowDiff(diff string) tea.Cmd {
+	return func() tea.Msg { return ShowDiffMsg{Diff: diff} }
+}
+
 // WrapCmd wraps the messages cmd produces with wrap, including those of
 // batched commands, so they find their way back to where cmd came from.
 // Commands sequenced with tea.Sequence can't be wrapped, so views mustn't
@@ -260,7 +311,7 @@ func WrapCmd(cmd tea.Cmd, wrap func(tea.Msg) tea.Msg) tea.Cmd {
 				wrapped = append(wrapped, WrapCmd(c, wrap))
 			}
 			return tea.BatchMsg(wrapped)
-		case OpenURLMsg:
+		case OpenURLMsg, ShowDiffMsg:
 			// Meant for gh-dash itself
 			return msg
 		default:

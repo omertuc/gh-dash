@@ -11,6 +11,7 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/common"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/actionmenu"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/notificationssection"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prrow"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prview"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/tasks"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/keys"
@@ -126,6 +127,9 @@ func (m *Model) pluginFocusHint() string {
 	}
 	if m.hasFocusedCheckCommands() {
 		hints = append(hints, keys.HintKeys(keys.NotificationKeys.CheckCommands)+" actions")
+	}
+	if m.hasPluginTabDiff() {
+		hints = append(hints, keys.HintKeys(keys.PRKeys.Diff)+" diff")
 	}
 	return strings.Join(hints, " · ")
 }
@@ -244,6 +248,39 @@ func (m *Model) postCheckCommand(c plugins.CheckCommand) tea.Cmd {
 	}
 	sid := tasks.SectionIdentifier{Id: m.currSectionId, Type: notificationssection.SectionType}
 	return tasks.CommentOnPR(m.ctx, sid, pr, c.Comment)
+}
+
+// isPRShown reports whether the PR view is what's shown in the preview: an
+// open notification's PR, or the PR selected in a PRs section.
+func (m *Model) isPRShown() bool {
+	if m.isNotificationSubjectShown() {
+		return m.notificationView.GetSubjectPR() != nil
+	}
+	if !m.sidebar.IsOpen {
+		return false
+	}
+	_, ok := m.getCurrRowData().(*prrow.Data)
+	return ok
+}
+
+// hasPluginTabDiff reports whether the selected tab of the shown PR is a
+// plugin's with a diff of its own, e.g. the PR's conflicts.
+func (m *Model) hasPluginTabDiff() bool {
+	if !m.isPRShown() {
+		return false
+	}
+	_, ok := m.prView.PluginTabDiff()
+	return ok
+}
+
+// showPluginTabDiff shows the diff of the selected plugin's tab in the diff
+// pager, the way the PR's diff is shown.
+func (m *Model) showPluginTabDiff() tea.Cmd {
+	diff, ok := m.prView.PluginTabDiff()
+	if !ok {
+		return nil
+	}
+	return common.PageDiff(diff, m.ctx.Config.GetDiffPager())
 }
 
 // clickPluginItem activates a clicked item of a plugin's view when it's

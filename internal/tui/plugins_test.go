@@ -81,7 +81,30 @@ func (v *fakeView) Render(env plugins.Env, width int) (string, []plugins.Item) {
 	return strings.Join(lines, "\n"), items
 }
 
-type fakePlugin struct{ view *fakeView }
+type fakePlugin struct {
+	view *fakeView
+	// tab is whether it shows a tab of its own for PRs, and tabView is what
+	// it shows once opened
+	tab     bool
+	tabView *fakeDiffView
+}
+
+// fakeDiffView has a diff of its own.
+type fakeDiffView struct{ fakeView }
+
+func (v *fakeDiffView) Diff() (string, bool) { return "diff --git a/f b/f", true }
+
+func (p *fakePlugin) Tabs(pr plugins.PR) []plugins.Tab {
+	if !p.tab {
+		return nil
+	}
+	return []plugins.Tab{{Key: "diff", Title: "Fake diff"}}
+}
+
+func (p *fakePlugin) OpenTab(env plugins.Env, pr plugins.PR, key string) plugins.View {
+	p.tabView = &fakeDiffView{}
+	return p.tabView
+}
 
 func (p *fakePlugin) Name() string                   { return "fake-ui" }
 func (p *fakePlugin) Configure(map[string]any) error { return nil }
@@ -385,4 +408,28 @@ func TestNotificationView_CheckCommandsInACheckTab(t *testing.T) {
 	require.NotContains(t, ansi.Strip(m.sidebar.View()), actions)
 	m.Update(tea.KeyPressMsg{Text: "."})
 	require.Nil(t, m.checkMenu)
+}
+
+func TestNotificationView_PluginTabShowsItsOwnDiff(t *testing.T) {
+	fake.tab = true
+	t.Cleanup(func() { fake.tab, fake.tabView = false, nil })
+	m := newPluginTestModel(t)
+	require.Contains(t, m.prView.SelectedTab(), "Checks")
+	require.False(t, m.hasPluginTabDiff(), "the PR's diff is shown")
+
+	// The plugin's tab follows the built-in ones, and opens once selected
+	for !strings.Contains(m.prView.SelectedTab(), "Files") {
+		m.Update(tea.KeyPressMsg{Text: "l"})
+	}
+	require.Nil(t, fake.tabView)
+	m.Update(tea.KeyPressMsg{Text: "l"})
+	require.Equal(t, "Fake", m.prView.SelectedTab())
+	require.NotNil(t, fake.tabView)
+	require.Contains(t, ansi.Strip(m.sidebar.View()), "Fake view")
+
+	require.True(t, m.hasPluginTabDiff())
+	m.updateSidebarHints()
+	require.Contains(t, ansi.Strip(m.sidebar.View()), keys.HintKeys(keys.PRKeys.Diff)+" diff")
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "d"})
+	require.NotNil(t, cmd, "the view's diff is shown in the pager")
 }
