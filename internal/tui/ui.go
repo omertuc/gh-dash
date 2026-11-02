@@ -1119,6 +1119,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Error("failed enriching pr", "err", msg.Err)
 		}
 
+	case issueview.EnrichedIssueMsg:
+		if msg.Err != nil {
+			log.Error("failed enriching issue", "err", msg.Err)
+		} else if msg.SectionId < len(m.issues) {
+			if section, ok := m.issues[msg.SectionId].(*issuessection.Model); ok {
+				section.EnrichIssue(msg.Data)
+				cmds = append(cmds, m.syncSidebar())
+			}
+		}
+
 	case notificationPRFetchedMsg:
 		m.stopNotificationLoading(msg.NotificationId)
 		if msg.Err == nil {
@@ -1531,6 +1541,9 @@ func (m *Model) onViewedRowChanged() tea.Cmd {
 	m.prView.GoToFirstTab()
 	sidebarCmd := m.syncSidebar()
 	enrichCmd := m.prView.EnrichCurrRow()
+	if _, ok := m.getCurrRowData().(*data.IssueData); ok {
+		enrichCmd = tea.Batch(enrichCmd, m.issueSidebar.EnrichCurrRow())
+	}
 	m.sidebar.ScrollToTop()
 	m.stashDraft()
 	m.notificationView.ResetSubject()
@@ -1589,8 +1602,9 @@ func (m *Model) updateSection(id int, sType string, msg tea.Msg) (cmd tea.Cmd) {
 
 	currSection := m.getCurrSection()
 	if currSection != nil && id == currSection.GetId() {
-		if _, ok := msg.(prssection.SectionPullRequestsFetchedMsg); ok {
-			cmd = m.onViewedRowChanged()
+		switch msg.(type) {
+		case prssection.SectionPullRequestsFetchedMsg, issuessection.SectionIssuesFetchedMsg:
+			cmd = tea.Batch(cmd, m.onViewedRowChanged())
 		}
 	}
 

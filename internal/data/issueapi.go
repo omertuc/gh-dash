@@ -26,15 +26,22 @@ type IssueData struct {
 	CreatedAt         time.Time
 	Url               string
 	Repository        Repository
-	Assignees         Assignees      `graphql:"assignees(first: 3)"`
+	Assignees         Assignees      `graphql:"assignees(first: 10)"`
 	Comments          IssueComments  `graphql:"comments(last: 15)"`
 	Reactions         IssueReactions `graphql:"reactions(first: 1)"`
-	Labels            IssueLabels    `graphql:"labels(first: 20)"`
+	Labels            IssueLabels    `graphql:"labels(first: 100)"`
 }
 
 type IssueComments struct {
 	Nodes      []IssueComment
 	TotalCount int
+	PageInfo   ConnectionPage
+}
+
+// HasAllComments says whether the issue's comments are all fetched, which
+// they're not when it was fetched as part of a list.
+func (issue IssueData) HasAllComments() bool {
+	return len(issue.Comments.Nodes) >= issue.Comments.TotalCount
 }
 
 type IssueComment struct {
@@ -185,7 +192,11 @@ func FetchIssue(issueUrl string) (IssueData, error) {
 	if err != nil {
 		return IssueData{}, err
 	}
+	issue := queryResult.Resource.Issue
+	if err := fetchRestOfConnection(parsedUrl, "Issue", &issue, "Comments"); err != nil {
+		return IssueData{}, err
+	}
 	log.Info("Successfully fetched Issue", "url", issueUrl)
 
-	return queryResult.Resource.Issue, nil
+	return issue, nil
 }

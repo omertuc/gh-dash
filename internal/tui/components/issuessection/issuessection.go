@@ -469,3 +469,13 @@ func (m Model) GetPagerContent() string {
 	pager := m.Ctx.Styles.ListViewPort.PagerStyle.Render(pagerContent)
 	return pager
 }
+
+// EnrichIssue replaces the issue with issue's URL by issue, which has all of
+// its comments.
+func (m *Model) EnrichIssue(issue data.IssueData) {
+	for i := range m.Issues {
+		if m.Issues[i].Url == issue.Url {
+			m.Issues[i] = issue
+		}
+	}
+}

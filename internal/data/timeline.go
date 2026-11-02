@@ -6,7 +6,8 @@ import "time"
 // reviews, which are fetched separately, e.g. pushed commits, force pushes,
 // references from other issues and label changes
 type TimelineItems struct {
-	Nodes []TimelineItem
+	Nodes    []TimelineItem
+	PageInfo ConnectionPage
 }
 
 type TimelineActor struct {

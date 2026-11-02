@@ -375,6 +375,27 @@ func (m *Model) SetSectionId(id int) {
 	m.sectionId = id
 }
 
+// EnrichedIssueMsg carries an issue with all of its comments, fetched because
+// its row in an issues list only had the newest ones.
+type EnrichedIssueMsg struct {
+	SectionId int
+	Data      data.IssueData
+	Err       error
+}
+
+// EnrichCurrRow fetches the current issue with all of its comments, if its
+// row doesn't have them all.
+func (m *Model) EnrichCurrRow() tea.Cmd {
+	if m.issue == nil || m.issue.Data.HasAllComments() {
+		return nil
+	}
+	url, sectionId := m.issue.Data.Url, m.sectionId
+	return func() tea.Msg {
+		issue, err := data.FetchIssue(url)
+		return EnrichedIssueMsg{SectionId: sectionId, Data: issue, Err: err}
+	}
+}
+
 func (m *Model) SetRow(data *data.IssueData) {
 	if data == nil {
 		m.issue = nil

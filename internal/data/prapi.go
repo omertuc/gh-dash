@@ -51,13 +51,15 @@ type EnrichedPullRequestData struct {
 	HeadRef struct {
 		Name string
 	}
-	Labels             PRLabels  `graphql:"labels(first: 30)"`
-	Assignees          Assignees `graphql:"assignees(first: 3)"`
+	// A connection with a PageInfo is only its newest or first page here,
+	// kept small so this query is fast on huge PRs; FetchPullRequest fetches
+	// the rest in pages of 100.
+	Labels             PRLabels  `graphql:"labels(first: 100)"`
+	Assignees          Assignees `graphql:"assignees(first: 10)"`
 	Repository         Repository
 	Commits            LastCommitWithStatusChecks `graphql:"commits(last: 1)"`
 	AllCommits         AllCommits                 `graphql:"allCommits: commits(last: 100)"`
-	// The newest comments; FetchPullRequest pages back for the rest.
-	Comments           CommentsWithBody           `graphql:"comments(last: 100)"`
+	Comments           CommentsWithBody           `graphql:"comments(last: 50)"`
 	ReviewThreads      ReviewThreadsWithComments  `graphql:"reviewThreads(last: 50)"`
 	ReviewRequests     ReviewRequests             `graphql:"reviewRequests(last: 100)"`
 	Reviews            Reviews                    `graphql:"reviews(last: 100)"`
@@ -90,7 +92,7 @@ type PullRequestData struct {
 		Name string
 	}
 	Repository       Repository
-	Assignees        Assignees            `graphql:"assignees(first: 3)"`
+	Assignees        Assignees            `graphql:"assignees(first: 10)"`
 	Comments         Comments             `graphql:"comments"`
 	ReviewThreads    ReviewThreads        `graphql:"reviewThreads"`
 	Reviews          ReviewsNumber        `graphql:"reviews"`
@@ -98,7 +100,7 @@ type PullRequestData struct {
 	IsDraft          bool
 	IsInMergeQueue   bool
 	Commits          LastCommitStatus `graphql:"commits(last: 1)"`
-	Labels           PRLabels         `graphql:"labels(first: 6)"`
+	Labels           PRLabels         `graphql:"labels(first: 100)"`
 	MergeStateStatus MergeStateStatus `graphql:"mergeStateStatus"`
 }
 
@@ -199,6 +201,7 @@ type AllCommits struct {
 			StatusCheckRollup StatusCheckRollupStats
 		}
 	}
+	PageInfo ConnectionPage
 }
 
 type LastCommitWithStatusChecks struct {
@@ -239,10 +242,7 @@ type LastCommitWithStatusChecks struct {
 type CommentsWithBody struct {
 	TotalCount graphql.Int
 	Nodes      []Comment
-	PageInfo   struct {
-		HasPreviousPage bool
-		StartCursor     string
-	}
+	PageInfo   ConnectionPage
 }
 
 type ContextCountByState = struct {
@@ -297,6 +297,7 @@ type ReviewComment struct {
 type ReviewComments struct {
 	Nodes      []ReviewComment
 	TotalCount int
+	PageInfo   ConnectionPage
 }
 
 type Comments struct {
@@ -324,6 +325,7 @@ type ReviewsNumber struct {
 type Reviews struct {
 	TotalCount int
 	Nodes      []Review
+	PageInfo   ConnectionPage
 }
 
 type ReviewThreadsWithComments struct {
@@ -336,6 +338,7 @@ type ReviewThreadsWithComments struct {
 		Path         string
 		Comments     ReviewComments `graphql:"comments(first: 20)"`
 	}
+	PageInfo ConnectionPage
 }
 
 type ChangedFile struct {
@@ -404,6 +407,7 @@ func restChangeType(status string) string {
 type ChangedFiles struct {
 	TotalCount int
 	Nodes      []ChangedFile
+	PageInfo   ConnectionPage
 }
 
 type RequestedReviewerUser struct {
@@ -440,6 +444,7 @@ type ReviewRequestsNumber struct {
 type ReviewRequests struct {
 	TotalCount int
 	Nodes      []ReviewRequestNode
+	PageInfo   ConnectionPage
 }
 
 func (r ReviewRequestNode) GetReviewerDisplayName() string {
@@ -685,35 +690,10 @@ func FetchPullRequest(prUrl string) (EnrichedPullRequestData, error) {
 		return EnrichedPullRequestData{}, err
 	}
 	pr := queryResult.Resource.PullRequest
-	if err := fetchOlderComments(parsedUrl, &pr.Comments); err != nil {
+	if err := fetchRestOfPullRequest(parsedUrl, &pr); err != nil {
 		return EnrichedPullRequestData{}, err
 	}
 	log.Info("Successfully fetched PR", "url", prUrl)
 
 	return pr, nil
-}
-
-// fetchOlderComments pages back through the PR's comments until comments
-// holds all of them, oldest first.
-func fetchOlderComments(prUrl *url.URL, comments *CommentsWithBody) error {
-	for comments.PageInfo.HasPreviousPage {
-		var queryResult struct {
-			Resource struct {
-				PullRequest struct {
-					Comments CommentsWithBody `graphql:"comments(last: 100, before: $before)"`
-				} `graphql:"... on PullRequest"`
-			} `graphql:"resource(url: $url)"`
-		}
-		variables := map[string]any{
-			"url":    githubv4.URI{URL: prUrl},
-			"before": graphql.String(comments.PageInfo.StartCursor),
-		}
-		if err := client.Query("FetchPullRequestComments", &queryResult, variables); err != nil {
-			return err
-		}
-		older := queryResult.Resource.PullRequest.Comments
-		comments.Nodes = append(older.Nodes, comments.Nodes...)
-		comments.PageInfo = older.PageInfo
-	}
-	return nil
 }
